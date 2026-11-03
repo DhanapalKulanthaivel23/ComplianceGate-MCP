@@ -1,0 +1,12 @@
+node_modules/
+build/
+dist/
+coverage/
+data/
+core/bin/
+.antigravity/
+.aistudio/
+.DS_Store
+*.log
+.env*
+!.env.example

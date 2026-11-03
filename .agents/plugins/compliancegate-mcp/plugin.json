@@ -1,0 +1,12 @@
+{
+  "name": "compliancegate-mcp",
+  "displayName": "ComplianceGate MCP",
+  "version": "1.0.0",
+  "description": "Multi-module financial crime, SWIFT MT / ISO 20022 MX payments, trade, maritime, air cargo, insurance, crypto, healthcare, and securities compliance screening MCP gateway.",
+  "suggestedPrompts": [
+    "Screen an MT103 or pacs.008 payment message and verify FATF Rec 16 completeness",
+    "Evaluate a maritime vessel IMO number, AIS gap history, and port call log",
+    "Run the multi-script evasion validation benchmark and report precision/recall"
+  ]
+}
+

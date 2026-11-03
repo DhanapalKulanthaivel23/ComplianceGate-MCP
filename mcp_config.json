@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "compliancegate-mcp": {
+      "command": "/Users/dhanapal/antigravity/ComplianceGate-MCP/node_modules/.bin/tsx",
+      "args": [
+        "/Users/dhanapal/antigravity/ComplianceGate-MCP/src/server/stdioMcp.ts"
+      ],
+      "env": {
+        "IS_PUBLIC_DEMO": "true"
+      }
+    },
+    "compliancegate-core-go": {
+      "command": "/Users/dhanapal/antigravity/ComplianceGate-MCP/core/bin/compliancegate-core",
+      "args": [
+        "-stdio-mcp"
+      ],
+      "env": {
+        "IS_PUBLIC_DEMO": "true"
+      }
+    },
+    "compliancegate-http": {
+      "url": "http://127.0.0.1:3000/mcp"
+    }
+  }
+}
+

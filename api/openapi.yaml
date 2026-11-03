@@ -1,0 +1,282 @@
+openapi: 3.0.3
+info:
+  title: ComplianceGate Core API
+  description: Single source of truth OpenAPI specification for the deterministic high-performance financial crime screening engine.
+  version: 1.0.0
+paths:
+  /api/v1/screen/entity:
+    post:
+      summary: Screen a single screenable entity (Person, Corporate, Vessel, Aircraft, Crypto Address)
+      operationId: screenEntity
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScreenEntityRequest'
+      responses:
+        '200':
+          description: Screening evaluation result with match candidates
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScreeningResult'
+
+  /api/v1/screen/message:
+    post:
+      summary: Ingest and screen a structured message (MT, MX, FIX, EDIFACT, X12, HL7, IVMS101, ACORD)
+      operationId: screenMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScreenMessageRequest'
+      responses:
+        '200':
+          description: Parsed entities and screening evaluation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageScreeningResult'
+
+  /api/v1/lists/status:
+    get:
+      summary: Retrieve watchlist versions, entry counts, and freshness status
+      operationId: getListStatus
+      responses:
+        '200':
+          description: Status of loaded watchlists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListStatusResponse'
+
+  /api/v1/lists/reload:
+    post:
+      summary: Trigger hot reload of watchlist folder from disk
+      operationId: reloadLists
+      responses:
+        '200':
+          description: Reload confirmation and new version hash
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReloadResponse'
+
+  /health:
+    get:
+      summary: Screening engine liveness and readiness probe
+      responses:
+        '200':
+          description: Engine is healthy and ready
+
+components:
+  schemas:
+    EntityType:
+      type: string
+      enum: [INDIVIDUAL, ENTITY, VESSEL, AIRCRAFT, CRYPTO_ADDRESS]
+
+    Identifier:
+      type: object
+      required: [type, value]
+      properties:
+        type:
+          type: string
+          enum: [BIC, LEI, TAX_ID, PASSPORT, IMO, MMSI, ISIN, NPI, DEA, ETH_ADDRESS, BTC_ADDRESS]
+        value:
+          type: string
+        country:
+          type: string
+
+    Address:
+      type: object
+      properties:
+        street:
+          type: string
+        city:
+          type: string
+        stateOrProvince:
+          type: string
+        postalCode:
+          type: string
+        country:
+          type: string
+        rawLines:
+          type: array
+          items:
+            type: string
+
+    ScreenableEntity:
+      type: object
+      required: [name, entityType]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        originalScript:
+          type: string
+        entityType:
+          $ref: '#/components/schemas/EntityType'
+        role:
+          type: string
+        identifiers:
+          type: array
+          items:
+            $ref: '#/components/schemas/Identifier'
+        addresses:
+          type: array
+          items:
+            $ref: '#/components/schemas/Address'
+        countries:
+          type: array
+          items:
+            type: string
+        goodsDescriptions:
+          type: array
+          items:
+            type: string
+        hsCodes:
+          type: array
+          items:
+            type: string
+        sourceTag:
+          type: string
+
+    ScreenEntityRequest:
+      type: object
+      required: [entity]
+      properties:
+        entity:
+          $ref: '#/components/schemas/ScreenableEntity'
+        threshold:
+          type: number
+          default: 0.80
+
+    MatchDetail:
+      type: object
+      required: [listId, listName, entryId, entryName, similarityScore, matchType]
+      properties:
+        listId:
+          type: string
+        listName:
+          type: string
+        entryId:
+          type: string
+        entryName:
+          type: string
+        entryType:
+          $ref: '#/components/schemas/EntityType'
+        matchType:
+          type: string
+          enum: [EXACT_IDENTIFIER, EXACT_NAME, FUZZY_NAME, PHONETIC, TOKEN_SET, ALIAS]
+        matchedField:
+          type: string
+        queryValue:
+          type: string
+        listValue:
+          type: string
+        similarityScore:
+          type: number
+        programs:
+          type: array
+          items:
+            type: string
+        notes:
+          type: string
+
+    ScreeningResult:
+      type: object
+      required: [entityId, findingSeverity, highestScore, matches, evidenceDigest]
+      properties:
+        entityId:
+          type: string
+        findingSeverity:
+          type: string
+          enum: [NO_MATCH_FOUND, FUZZY_NAME_CANDIDATE, EXACT_IDENTIFIER_MATCH]
+        highestScore:
+          type: number
+        matches:
+          type: array
+          items:
+            $ref: '#/components/schemas/MatchDetail'
+        evidenceDigest:
+          type: string
+        evaluationDurationMs:
+          type: number
+
+    ScreenMessageRequest:
+      type: object
+      required: [format, rawContent]
+      properties:
+        format:
+          type: string
+          enum: [MT, ISO20022, FIX, EDIFACT, X12, HL7, IVMS101, ACORD]
+        subType:
+          type: string
+        rawContent:
+          type: string
+        threshold:
+          type: number
+          default: 0.80
+
+    MessageScreeningResult:
+      type: object
+      required: [format, entitiesExtracted, entityResults, disposition, evidenceDigest]
+      properties:
+        format:
+          type: string
+        subType:
+          type: string
+        entitiesExtracted:
+          type: integer
+        entities:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScreenableEntity'
+        entityResults:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScreeningResult'
+        disposition:
+          type: string
+          enum: [AUTO_RELEASE, MANUAL_REVIEW_REQUIRED, BLOCKED]
+        evidenceDigest:
+          type: string
+
+    ListStatusResponse:
+      type: object
+      required: [totalEntries, lists]
+      properties:
+        totalEntries:
+          type: integer
+        versionHash:
+          type: string
+        lastReloadTimestamp:
+          type: string
+        lists:
+          type: array
+          items:
+            type: object
+            properties:
+              listId:
+                type: string
+              name:
+                type: string
+              source:
+                type: string
+              entryCount:
+                type: integer
+              lastUpdated:
+                type: string
+
+    ReloadResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        entriesLoaded:
+          type: integer
+        versionHash:
+          type: string

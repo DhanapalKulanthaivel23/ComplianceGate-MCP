@@ -1,0 +1,28 @@
+services:
+  compliancegate-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: compliancegate-mcp
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - PORT=3000
+      - IS_PUBLIC_DEMO=${IS_PUBLIC_DEMO:-true}
+      - DATA_DIR=${DATA_DIR:-/app/data}
+      - LICENSED_LISTS_DIR=${LICENSED_LISTS_DIR:-/app/lists/licensed}
+      - INTERNAL_LISTS_DIR=${INTERNAL_LISTS_DIR:-/app/lists/internal}
+      - WATCHLIST_DIRS=${WATCHLIST_DIRS:-/app/lists}
+      - LIST_FOLDERS=${LIST_FOLDERS:-/app/lists}
+      - OFAC_LIST_DIR=${OFAC_LIST_DIR:-/app/lists/ofac}
+      - EU_LIST_DIR=${EU_LIST_DIR:-/app/lists/eu}
+      - UN_LIST_DIR=${UN_LIST_DIR:-/app/lists/un}
+      - UK_LIST_DIR=${UK_LIST_DIR:-/app/lists/uk}
+      - VESSEL_LIST_DIR=${VESSEL_LIST_DIR:-/app/lists/vessels}
+    volumes:
+      - ./data/lists:/app/lists:ro
+      - ./data/state:/app/data:rw
+    restart: unless-stopped
+
+
