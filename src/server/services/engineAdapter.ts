@@ -20,12 +20,14 @@ import {
 } from '../../shared/types.ts';
 import { normalizeEntityName, normalizeIdentifier, sha256, tokenSortRatio, tokenSetRatio } from './normalizer.ts';
 import { watchlistService } from './watchlist.ts';
+import { memorySearchIndex } from './memoryIndex.ts';
+import { screeningService } from './screeningService.ts';
 
 export interface IScreeningEngine {
   readonly id: string;
   readonly name: string;
   readonly mode: 'EMBEDDED_SYNTHETIC' | 'CLIENT_REMOTE_ADAPTER';
-  screenParty(party: CanonicalParty): Promise<PartyScreeningOutcome>;
+  screenParty(party: CanonicalParty, tenantId?: string): Promise<PartyScreeningOutcome>;
   getHealth(): Promise<EngineHealth>;
 }
 
@@ -55,7 +57,17 @@ export class EmbeddedSyntheticEngine implements IScreeningEngine {
     };
   }
 
-  public screenPartySync(party: CanonicalParty): PartyScreeningOutcome {
+  public screenPartySync(party: CanonicalParty, tenantId = 'default'): PartyScreeningOutcome {
+    if (memorySearchIndex.isReady()) {
+      const outcome = screeningService.screenPartySync(party, tenantId);
+      if (outcome.matches.length > 0) {
+        return outcome;
+      }
+    }
+    return this.screenPartyLegacy(party);
+  }
+
+  public screenPartyLegacy(party: CanonicalParty): PartyScreeningOutcome {
     const allEntries = watchlistService.getAllEntries();
     const matches: MatchDetail[] = [];
     const partyNameNorm = normalizeEntityName(party.name);
@@ -208,8 +220,8 @@ export class EmbeddedSyntheticEngine implements IScreeningEngine {
     };
   }
 
-  public async screenParty(party: CanonicalParty): Promise<PartyScreeningOutcome> {
-    return this.screenPartySync(party);
+  public async screenParty(party: CanonicalParty, tenantId = 'default'): Promise<PartyScreeningOutcome> {
+    return this.screenPartySync(party, tenantId);
   }
 }
 

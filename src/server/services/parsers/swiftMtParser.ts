@@ -79,6 +79,22 @@ export function parseTags(text: string): SwiftTagRecord[] {
 }
 
 /**
+ * Strict calendar date validator enforcing months (1..12), day boundaries per month,
+ * leap-year February rules, and rejecting impossible calendar dates.
+ */
+export function isValidCalendarDate(year: number, month: number, day: number): boolean {
+  if (isNaN(year) || isNaN(month) || isNaN(day)) return false;
+  if (month < 1 || month > 12) return false;
+  if (day < 1 || day > 31) return false;
+
+  const daysInMonths = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  const isLeapYear = (year % 4 === 0 && year % 100 !== 0) || (year % 400 === 0);
+  const maxDays = month === 2 && isLeapYear ? 29 : daysInMonths[month - 1];
+
+  return day <= maxDays;
+}
+
+/**
  * Parses Field :32A: (Date, Currency, Amount).
  * Throws explicit error if missing or invalid — NEVER fabricates defaults.
  */
@@ -95,9 +111,20 @@ export function parseField32A(value: string | undefined): { date: string; curren
   }
 
   const yymmdd = match[1];
-  const year = parseInt(yymmdd.slice(0, 2), 10) >= 50 ? `19${yymmdd.slice(0, 2)}` : `20${yymmdd.slice(0, 2)}`;
+  const yy = parseInt(yymmdd.slice(0, 2), 10);
+  const yearNum = yy >= 50 ? 1900 + yy : 2000 + yy;
+  const year = String(yearNum);
+  const mm = parseInt(yymmdd.slice(2, 4), 10);
+  const dd = parseInt(yymmdd.slice(4, 6), 10);
   const month = yymmdd.slice(2, 4);
   const day = yymmdd.slice(4, 6);
+
+  if (!isValidCalendarDate(yearNum, mm, dd)) {
+    throw new Error(
+      `Invalid settlement date: impossible calendar date [${year}-${month}-${day}] in Field :32A: (month ${month}, day ${day} not valid for year ${year}).`
+    );
+  }
+
   const date = `${year}-${month}-${day}`;
 
   const currency = match[2];
@@ -341,11 +368,7 @@ export function parseFlexibleMtFinancials(tags: SwiftTagRecord[]): { date: strin
   // 1. Try standard :32A: or :32K: / :60F: / :62F: with YYMMDD + Currency + Amount
   const tag32A = tags.find((r) => r.tag === '32A');
   if (tag32A) {
-    try {
-      return parseField32A(tag32A.value);
-    } catch {
-      // Fall through to flexible patterns
-    }
+    return parseField32A(tag32A.value);
   }
 
   for (const r of tags) {
@@ -356,8 +379,16 @@ export function parseFlexibleMtFinancials(tags: SwiftTagRecord[]): { date: strin
       const dateCcyAmt = val.match(/^[CD]?(\d{6})([A-Z]{3})([0-9]+(?:[.,][0-9]+)?)/);
       if (dateCcyAmt) {
         const yymmdd = dateCcyAmt[1];
-        const year = parseInt(yymmdd.slice(0, 2), 10) >= 50 ? `19${yymmdd.slice(0, 2)}` : `20${yymmdd.slice(0, 2)}`;
-        const date = `${year}-${yymmdd.slice(2, 4)}-${yymmdd.slice(4, 6)}`;
+        const yy = parseInt(yymmdd.slice(0, 2), 10);
+        const yearNum = yy >= 50 ? 1900 + yy : 2000 + yy;
+        const mm = parseInt(yymmdd.slice(2, 4), 10);
+        const dd = parseInt(yymmdd.slice(4, 6), 10);
+        if (!isValidCalendarDate(yearNum, mm, dd)) {
+          throw new Error(
+            `Invalid settlement date: impossible calendar date [${yearNum}-${yymmdd.slice(2, 4)}-${yymmdd.slice(4, 6)}] in Field :${r.tag}:.`
+          );
+        }
+        const date = `${yearNum}-${yymmdd.slice(2, 4)}-${yymmdd.slice(4, 6)}`;
         const currency = dateCcyAmt[2];
         const amount = parseFloat(dateCcyAmt[3].replace(',', '.')) || 0;
         return { date, currency, amount };

@@ -51,10 +51,21 @@ export function normalizeEntityName(input: string): string {
   // Regex keeping Unicode letters (\p{L}), numbers (\p{N}), and whitespace
   text = text.replace(/[^\p{L}\p{N}\s]/gu, ' ');
 
-  // Step 4b: If input has single-letter spaced fragmentation (e.g. "o c e a n i c"), collapse adjacent single letters
-  while (/\b([a-zA-Z0-9])\s+([a-zA-Z0-9])\b/.test(text)) {
-    text = text.replace(/\b([a-zA-Z0-9])\s+([a-zA-Z0-9])\b/g, '$1$2');
-  }
+  // Step 4b: Handle whole-run single-letter fragmentation while strictly preserving word boundaries
+  // Separate tokens by multi-space boundaries if present (e.g., "O c e a n i c   A u r o r a")
+  const segments = text.split(/\s{2,}/);
+  const defragmentedSegments = segments.map((seg) => {
+    // Check if the entire segment consists of single characters separated by spaces: "o c e a n i c"
+    const tokens = seg.trim().split(/\s+/).filter(Boolean);
+    if (tokens.length > 1 && tokens.every((t) => t.length === 1)) {
+      return tokens.join('');
+    }
+    // Handle runs of 3 or more single letters inside a larger segment: "co o c e a n i c ltd"
+    return seg.replace(/\b(?:[\p{L}\p{N}]\s+){2,}[\p{L}\p{N}]\b/gu, (match) => {
+      return match.replace(/\s+/g, '');
+    });
+  });
+  text = defragmentedSegments.join(' ');
 
   // Step 5: Collapse multiple whitespaces and trim
   return text.replace(/\s+/g, ' ').trim();
@@ -267,6 +278,53 @@ function canonicalStringify(obj: any): string {
   const keys = Object.keys(obj).sort();
   const entries = keys.map((k) => `${JSON.stringify(k)}:${canonicalStringify(obj[k])}`);
   return `{${entries.join(',')}}`;
+}
+
+/**
+ * Masks account numbers, national IDs, passport identifiers, local IDs, and sanitizes raw snippets
+ * to prevent leakage of unredacted PII into LLM model contexts.
+ */
+export function redactSensitiveDataForAgent(obj: any): any {
+  if (obj === null || obj === undefined) return obj;
+  if (typeof obj === 'string') {
+    // Redact IBAN / Account numbers
+    let redacted = obj.replace(/[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}/g, (iban) => `${iban.slice(0, 4)}****${iban.slice(-4)}`);
+    // Redact passport-like strings
+    redacted = redacted.replace(/([A-Z]{2}-DEMO-)\d{5,8}/g, '$1****');
+    // Redact national tax IDs
+    redacted = redacted.replace(/(RU-DEMO-INN-)\d{6,12}/g, '$1****');
+    redacted = redacted.replace(/(CN-DEMO-)\d{10,20}/g, '$1****');
+    return redacted;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(redactSensitiveDataForAgent);
+  }
+  if (typeof obj === 'object') {
+    const copy: any = {};
+    for (const [key, value] of Object.entries(obj)) {
+      if (key === 'accountNumber' && typeof value === 'string') {
+        copy[key] = value.length > 6 ? `${value.slice(0, 4)}****${value.slice(-3)}` : '****';
+      } else if (key === 'rawSnippet' || key === 'rawMessageSnippet') {
+        // Redact raw snippet lines containing account numbers or IDs
+        if (typeof value === 'string') {
+          copy[key] = value
+            .replace(/\/[A-Z0-9]+/g, '/***REDACTED_ACCOUNT***')
+            .replace(/([A-Z]{2}-DEMO-)\d+/g, '$1****');
+        } else {
+          copy[key] = '[REDACTED_FOR_AGENT_CONTEXT]';
+        }
+      } else if (key === 'identifiers' && Array.isArray(value)) {
+        copy[key] = value.map((id: any) => ({
+          ...id,
+          value: id.value ? `${id.value.slice(0, 2)}****${id.value.slice(-2)}` : '****',
+        }));
+      } else {
+        copy[key] = redactSensitiveDataForAgent(value);
+      }
+    }
+    return copy;
+  }
+  return obj;
 }
 
 /**

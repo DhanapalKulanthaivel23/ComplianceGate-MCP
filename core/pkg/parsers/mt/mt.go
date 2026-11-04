@@ -27,6 +27,19 @@ type tagRecord struct {
 	Value string
 }
 
+func isValidCalendarDate(year, month, day int) bool {
+	if month < 1 || month > 12 || day < 1 || day > 31 {
+		return false
+	}
+	daysInMonth := []int{31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
+	isLeap := (year%4 == 0 && year%100 != 0) || (year%400 == 0)
+	maxDays := daysInMonth[month-1]
+	if month == 2 && isLeap {
+		maxDays = 29
+	}
+	return day <= maxDays
+}
+
 func parseField32A(val string) (string, string, float64, error) {
 	clean := strings.TrimSpace(val)
 	if clean == "" {
@@ -39,8 +52,15 @@ func parseField32A(val string) (string, string, float64, error) {
 	yymmdd := m[1]
 	yy, _ := strconv.Atoi(yymmdd[:2])
 	century := "20"
+	year := 2000 + yy
 	if yy >= 50 {
 		century = "19"
+		year = 1900 + yy
+	}
+	mm, _ := strconv.Atoi(yymmdd[2:4])
+	dd, _ := strconv.Atoi(yymmdd[4:6])
+	if !isValidCalendarDate(year, mm, dd) {
+		return "", "", 0, fmt.Errorf("invalid settlement date: impossible calendar date [%s%s-%s-%s] in Field :32A:", century, yymmdd[:2], yymmdd[2:4], yymmdd[4:6])
 	}
 	date := fmt.Sprintf("%s%s-%s-%s", century, yymmdd[:2], yymmdd[2:4], yymmdd[4:6])
 	ccy := m[2]

@@ -145,8 +145,8 @@ export class DurableStorageEngine {
       } finally {
         fs.closeSync(fd);
       }
-    } catch {
-      // Ignore if running in read-only sandbox
+    } catch (err: any) {
+      throw new Error(`Durable storage write failure on WAL append: ${err.message}`);
     }
 
     if (this.sqliteAvailable && (eventType === 'CASE_UPSERT' || eventType === 'DECISION_RECORDED')) {
@@ -199,13 +199,14 @@ export class DurableStorageEngine {
         fs.closeSync(fd);
       }
       fs.renameSync(tmpPath, this.storeFilePath);
-    } catch {
-      // Ignore if read-only filesystem
+    } catch (err: any) {
+      throw new Error(`Durable storage write failure on checkpoint save: ${err.message}`);
     }
   }
 
   /**
    * Loads cases and workflows from checkpoint and replays any newer WAL entries for crash recovery.
+   * Strictly validates WAL sequence numbers, previous hashes, and payload digests before applying.
    */
   public loadAndRecoverState(): { cases: Map<string, PaymentComplianceCase>; workflows: Map<string, any> } {
     const cases = new Map<string, PaymentComplianceCase>();
@@ -224,7 +225,15 @@ export class DurableStorageEngine {
         }
         if (Array.isArray(parsed.cases)) {
           for (const c of parsed.cases) {
-            cases.set(c.caseId, c);
+            const tenantId = c.tenantId || 'default';
+            const txId = c.transaction?.transactionId;
+            let caseKey = c.caseId;
+            if (txId && !caseKey.startsWith(`case_${tenantId !== 'default' ? tenantId + '_' : ''}`)) {
+              const txHash = crypto.createHash('sha256').update(`${tenantId}:${txId}`).digest('hex').slice(0, 8);
+              caseKey = `case_${tenantId !== 'default' ? tenantId + '_' : ''}${txId.replace(/[^a-zA-Z0-9_-]/g, '_')}_${txHash}`;
+              c.caseId = caseKey;
+            }
+            cases.set(caseKey, c);
           }
         }
         if (Array.isArray(parsed.workflows)) {
@@ -238,28 +247,67 @@ export class DurableStorageEngine {
     }
 
     // 2. Replay WAL records to recover any uncommitted post-checkpoint mutations
-    try {
-      if (fs.existsSync(this.walFilePath)) {
-        const lines = fs.readFileSync(this.walFilePath, 'utf8').split(/\r?\n/).filter(Boolean);
-        for (const line of lines) {
-          try {
-            const rec = JSON.parse(line) as WalRecord;
-            if (rec.seq > this.walSeq) {
-              this.walSeq = rec.seq;
-              this.lastWalHash = rec.walHash;
-            }
-            if ((rec.eventType === 'CASE_UPSERT' || rec.eventType === 'DECISION_RECORDED') && rec.payload?.caseId) {
-              cases.set(rec.payload.caseId, rec.payload);
-            } else if (rec.eventType === 'WORKFLOW_UPSERT' && rec.payload?.workflowId) {
-              workflows.set(rec.payload.workflowId, rec.payload);
-            }
-          } catch {
-            // Skip malformed tail line if interrupted mid-append
+    if (fs.existsSync(this.walFilePath)) {
+      const rawContent = fs.readFileSync(this.walFilePath, 'utf8');
+      const lines = rawContent.split(/\r?\n/).filter(Boolean);
+      let expectedPrev = 'GENESIS_WAL';
+      let currentSeq = 0;
+
+      for (let i = 0; i < lines.length; i++) {
+        let rec: WalRecord;
+        try {
+          rec = JSON.parse(lines[i]) as WalRecord;
+        } catch {
+          const isLastLine = i === lines.length - 1;
+          if (isLastLine) {
+            console.warn(`[DurableStorage] Incomplete crash-tail record at line ${i + 1} skipped during recovery.`);
+            break;
           }
+          throw new Error(`DurableStorage corruption: unparseable JSON WAL record at line ${i + 1} (mid-file corruption)`);
+        }
+
+        if (rec.seq !== currentSeq + 1) {
+          throw new Error(`DurableStorage corruption: invalid WAL sequence number ${rec.seq} at line ${i + 1}; expected ${currentSeq + 1}`);
+        }
+        if (rec.previousWalHash !== expectedPrev) {
+          throw new Error(`DurableStorage corruption: broken WAL hash chain at seq ${rec.seq}; expected previous ${expectedPrev}, got ${rec.previousWalHash}`);
+        }
+
+        const recomputed = sha256({
+          seq: rec.seq,
+          timestamp: rec.timestamp,
+          eventType: rec.eventType,
+          tenantId: rec.tenantId,
+          entityId: rec.entityId,
+          payloadDigest: sha256(rec.payload),
+          previousWalHash: rec.previousWalHash,
+        });
+        if (recomputed !== rec.walHash) {
+          throw new Error(`DurableStorage security violation: tampered WAL record payload at seq ${rec.seq}`);
+        }
+
+        expectedPrev = rec.walHash;
+        currentSeq = rec.seq;
+
+        if (rec.seq > this.walSeq) {
+          this.walSeq = rec.seq;
+          this.lastWalHash = rec.walHash;
+        }
+
+        if ((rec.eventType === 'CASE_UPSERT' || rec.eventType === 'DECISION_RECORDED') && rec.payload?.caseId) {
+          const tenantId = rec.tenantId || rec.payload.tenantId || 'default';
+          const txId = rec.payload.transaction?.transactionId;
+          let caseKey = rec.payload.caseId;
+          if (txId && !caseKey.startsWith(`case_${tenantId !== 'default' ? tenantId + '_' : ''}`)) {
+            const txHash = crypto.createHash('sha256').update(`${tenantId}:${txId}`).digest('hex').slice(0, 8);
+            caseKey = `case_${tenantId !== 'default' ? tenantId + '_' : ''}${txId.replace(/[^a-zA-Z0-9_-]/g, '_')}_${txHash}`;
+            rec.payload.caseId = caseKey;
+          }
+          cases.set(caseKey, rec.payload);
+        } else if (rec.eventType === 'WORKFLOW_UPSERT' && rec.payload?.workflowId) {
+          workflows.set(rec.payload.workflowId, rec.payload);
         }
       }
-    } catch {
-      // Ignore if WAL does not exist yet
     }
 
     return { cases, workflows };

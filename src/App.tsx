@@ -28,9 +28,18 @@ import {
   Check,
   X,
   FileCheck,
+  Boxes,
+  Anchor,
+  Plane,
+  Cpu,
+  Activity,
+  TrendingUp,
+  Share2,
 } from 'lucide-react';
 import {
   ComplianceModuleId,
+  COMPLIANCE_MODULES,
+  AlertEvidenceGraph,
   CanonicalPaymentTransaction,
   CaseAdjudicationDecision,
   CaseStatus,
@@ -44,7 +53,6 @@ import {
 } from './shared/types.ts';
 import { SYNTHETIC_PAYMENT_FIXTURES, SyntheticPaymentFixture } from './server/services/syntheticFixtures.ts';
 import {
-  ModuleSelectorBar,
   ModuleHeader,
   TradeAndCargoWorkspace,
   MaritimeWorkspace,
@@ -54,7 +62,10 @@ import {
   HealthcareWorkspace,
   SecuritiesWorkspace,
   ValidationAndAuditWorkspace,
+  ListsAndDataSourcesWorkspace,
+  ModuleWorkspaceShell,
 } from './components/ModuleWorkspaces.tsx';
+import { EvidenceGraphView } from './components/EvidenceGraphView.tsx';
 
 export default function App() {
   const [selectedModule, setSelectedModule] = useState<ComplianceModuleId>('PAYMENTS');
@@ -68,12 +79,16 @@ export default function App() {
   const [parsedTransactions, setParsedTransactions] = useState<CanonicalPaymentTransaction[]>([]);
   const [selectedTxIndex, setSelectedTxIndex] = useState<number>(0);
   const [screeningResult, setScreeningResult] = useState<PaymentScreeningResult | null>(null);
+  const [screeningGraph, setScreeningGraph] = useState<AlertEvidenceGraph | null>(null);
+  const [terminalResultSubTab, setTerminalResultSubTab] = useState<'matrix' | 'graph'>('matrix');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Case Queue State
   const [cases, setCases] = useState<PaymentComplianceCase[]>([]);
   const [selectedCase, setSelectedCase] = useState<PaymentComplianceCase | null>(null);
+  const [caseGraph, setCaseGraph] = useState<AlertEvidenceGraph | null>(null);
+  const [caseDetailSubTab, setCaseDetailSubTab] = useState<'details' | 'graph'>('details');
   const [decisionType, setDecisionType] = useState<CaseAdjudicationDecision>('CONFIRM_ENTITY_MATCH');
   const [rationale, setRationale] = useState<string>('');
   const [isAdjudicating, setIsAdjudicating] = useState<boolean>(false);
@@ -87,6 +102,7 @@ export default function App() {
   const [batchRaw, setBatchRaw] = useState<string>('');
   const [batchResults, setBatchResults] = useState<any[]>([]);
   const [isBatchRunning, setIsBatchRunning] = useState<boolean>(false);
+  const [expandedBatchIndex, setExpandedBatchIndex] = useState<number | null>(null);
 
   // Load initial data
   useEffect(() => {
@@ -181,6 +197,20 @@ export default function App() {
       if (res.ok) {
         setScreeningResult(data);
         fetchCases();
+        // Dynamically build/fetch evidence graph
+        try {
+          const gRes = await fetch('/api/graphs/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-analyst-token': DEMO_ANALYST_TOKEN },
+            body: JSON.stringify({ moduleId: 'PAYMENTS', payload: { screeningResult: data, transaction: tx } }),
+          });
+          if (gRes.ok) {
+            const g = await gRes.json();
+            setScreeningGraph(g);
+          }
+        } catch {
+          // Non-fatal
+        }
       } else {
         setErrorMsg(data.error || 'Screening error.');
       }
@@ -188,6 +218,20 @@ export default function App() {
       setErrorMsg(err.message);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const fetchCaseGraph = async (caseId: string) => {
+    try {
+      const res = await fetch(`/api/cases/${caseId}/graph`, {
+        headers: { 'x-analyst-token': DEMO_ANALYST_TOKEN },
+      });
+      if (res.ok) {
+        const g = await res.json();
+        setCaseGraph(g);
+      }
+    } catch {
+      // Non-fatal
     }
   };
 
@@ -235,6 +279,7 @@ export default function App() {
         setAdjudicateSuccess(`Decision recorded successfully. Status updated to ${data.status}.`);
         setRationale('');
         fetchCases();
+        fetchCaseGraph(data.caseId);
       } else {
         alert(data.error || 'Adjudication failed.');
       }
@@ -271,121 +316,95 @@ export default function App() {
 
   const currentTx = parsedTransactions[selectedTxIndex];
 
-  return (
-    <div className="flex flex-col h-screen w-full bg-slate-50 text-slate-900 font-sans antialiased overflow-hidden">
-      <ModuleSelectorBar selectedModule={selectedModule} onSelectModule={setSelectedModule} />
+  const getModuleIcon = (id: ComplianceModuleId) => {
+    switch (id) {
+      case 'PAYMENTS': return <FileText className="w-4 h-4" />;
+      case 'TRADE_AND_CARGO': return <Boxes className="w-4 h-4" />;
+      case 'MARITIME': return <Anchor className="w-4 h-4" />;
+      case 'AIR_CARGO': return <Plane className="w-4 h-4" />;
+      case 'INSURANCE': return <ShieldCheck className="w-4 h-4" />;
+      case 'CRYPTO': return <Cpu className="w-4 h-4" />;
+      case 'HEALTHCARE': return <Activity className="w-4 h-4" />;
+      case 'SECURITIES': return <TrendingUp className="w-4 h-4" />;
+      case 'VALIDATION_AND_AUDIT': return <CheckCircle2 className="w-4 h-4" />;
+      case 'LISTS_AND_DATA_SOURCES': return <Database className="w-4 h-4" />;
+    }
+  };
 
-      {selectedModule === 'PAYMENTS' ? (
-        <div className="flex flex-1 overflow-hidden">
-          {/* 1. Left Responsive Sidebar */}
-          <aside className="w-64 shrink-0 bg-slate-900 text-slate-200 flex flex-col border-r border-slate-800">
+  const getModuleSubtitle = (id: ComplianceModuleId) => {
+    switch (id) {
+      case 'PAYMENTS': return 'SWIFT MT & ISO 20022 Screening';
+      case 'TRADE_AND_CARGO': return 'Invoice, B/L & Dual-Use Goods';
+      case 'MARITIME': return 'IMO Luhn, AIS & Flag Tracking';
+      case 'AIR_CARGO': return 'IATA AWB & Carrier Screening';
+      case 'INSURANCE': return 'UBO Hierarchy & Policy Vetting';
+      case 'CRYPTO': return 'Travel Rule & Cluster Analytics';
+      case 'HEALTHCARE': return 'NPI Mod-10 & OIG Exclusion';
+      case 'SECURITIES': return 'FIX Protocol & Sectoral Sanctions';
+      case 'VALIDATION_AND_AUDIT': return 'Synthetic Sanctions Benchmarks';
+      case 'LISTS_AND_DATA_SOURCES': return 'Sources, Snapshots & Index';
+    }
+  };
+
+  return (
+    <div className="flex h-screen w-full bg-slate-50 text-slate-900 font-sans antialiased overflow-hidden">
+      {/* 1. Persistent Responsive Left Sidebar (All 9 Modules) */}
+      <aside className="w-64 shrink-0 bg-slate-900 text-slate-200 flex flex-col border-r border-slate-800 h-full">
         {/* Brand Zone */}
         <div className="p-4 border-b border-slate-800 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded bg-teal-600 flex items-center justify-center text-white font-bold text-sm">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-teal-600 flex items-center justify-center text-white font-bold text-sm shadow-xs">
               CG
             </div>
             <div>
               <h1 className="text-sm font-bold tracking-tight text-white leading-tight">
                 ComplianceGate
               </h1>
-              <p className="text-[11px] text-teal-400 font-mono">MCP Payments Gateway</p>
+              <p className="text-[10px] text-teal-400 font-mono tracking-wide">Multi-Module MCP Gateway</p>
             </div>
           </div>
         </div>
 
-        {/* Navigation Items */}
-        <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
-          <button
-            onClick={() => setActiveTab('overview')}
-            className={`w-full flex items-center gap-3 px-3 py-2 text-xs font-medium rounded transition-colors ${
-              activeTab === 'overview'
-                ? 'bg-teal-600 text-white'
-                : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-            }`}
-          >
-            <Layers className="w-4 h-4 shrink-0" />
-            <span>Overview & Queue</span>
-          </button>
+        {/* Modules Navigation Header */}
+        <div className="px-3.5 pt-3 pb-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+          Compliance Modules
+        </div>
 
-          <button
-            onClick={() => setActiveTab('terminal')}
-            className={`w-full flex items-center gap-3 px-3 py-2 text-xs font-medium rounded transition-colors ${
-              activeTab === 'terminal'
-                ? 'bg-teal-600 text-white'
-                : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-            }`}
-          >
-            <Terminal className="w-4 h-4 shrink-0" />
-            <span>Single Payment Terminal</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('batch')}
-            className={`w-full flex items-center gap-3 px-3 py-2 text-xs font-medium rounded transition-colors ${
-              activeTab === 'batch'
-                ? 'bg-teal-600 text-white'
-                : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-            }`}
-          >
-            <Database className="w-4 h-4 shrink-0" />
-            <span>Batch Ingestion Studio</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('cases')}
-            className={`w-full flex items-center justify-between px-3 py-2 text-xs font-medium rounded transition-colors ${
-              activeTab === 'cases'
-                ? 'bg-teal-600 text-white'
-                : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-            }`}
-          >
-            <div className="flex items-center gap-3">
-              <ShieldAlert className="w-4 h-4 shrink-0" />
-              <span>Case Adjudication</span>
-            </div>
-            {cases.length > 0 && (
-              <span className="font-mono text-[10px] bg-slate-800 text-teal-300 px-1.5 py-0.5 rounded">
-                {cases.length}
-              </span>
-            )}
-          </button>
-
-          <button
-            onClick={() => setActiveTab('health')}
-            className={`w-full flex items-center gap-3 px-3 py-2 text-xs font-medium rounded transition-colors ${
-              activeTab === 'health'
-                ? 'bg-teal-600 text-white'
-                : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-            }`}
-          >
-            <RefreshCw className="w-4 h-4 shrink-0" />
-            <span>Watchlists & Freshness</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('evidence')}
-            className={`w-full flex items-center gap-3 px-3 py-2 text-xs font-medium rounded transition-colors ${
-              activeTab === 'evidence'
-                ? 'bg-teal-600 text-white'
-                : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-            }`}
-          >
-            <FileCheck className="w-4 h-4 shrink-0" />
-            <span>Evidence & Audit Ledger</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('admin')}
-            className={`w-full flex items-center gap-3 px-3 py-2 text-xs font-medium rounded transition-colors ${
-              activeTab === 'admin'
-                ? 'bg-teal-600 text-white'
-                : 'text-slate-300 hover:bg-slate-800 hover:text-white'
-            }`}
-          >
-            <Server className="w-4 h-4 shrink-0" />
-            <span>Admin & Diagnostics</span>
-          </button>
+        {/* Navigation Items (The 9 Modules) */}
+        <nav className="flex-1 px-2.5 py-1 space-y-1 overflow-y-auto">
+          {COMPLIANCE_MODULES.map((mod) => {
+            const active = selectedModule === mod.id;
+            return (
+              <button
+                key={mod.id}
+                onClick={() => setSelectedModule(mod.id)}
+                className={`w-full flex items-start gap-2.5 px-3 py-2 text-xs rounded-lg transition-all text-left ${
+                  active
+                    ? 'bg-teal-600 text-white font-semibold shadow-xs'
+                    : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+                }`}
+              >
+                <span className={`shrink-0 mt-0.5 ${active ? 'text-white' : 'text-slate-400'}`}>
+                  {getModuleIcon(mod.id)}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="truncate font-medium text-xs">
+                    {mod.name.replace(' Compliance', '').replace(' Security', '').replace(' Integrity', '')}
+                  </div>
+                  <div className={`truncate text-[10px] ${active ? 'text-teal-100' : 'text-slate-400'}`}>
+                    {getModuleSubtitle(mod.id)}
+                  </div>
+                </div>
+                {mod.id === 'PAYMENTS' && cases.length > 0 && (
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-bold shrink-0 ${
+                    active ? 'bg-teal-800 text-teal-100' : 'bg-slate-800 text-teal-300'
+                  }`}>
+                    {cases.length}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </nav>
 
         {/* User Session & Status */}
@@ -395,47 +414,133 @@ export default function App() {
             <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
           </div>
           <p className="text-[10px] text-slate-500 font-mono truncate">Role: compliance_officer_sandbox</p>
-          <p className="text-[10px] text-teal-400 font-mono mt-1">Policy: POL-2026.11-PAYMENTS</p>
+          <p className="text-[10px] text-teal-400 font-mono mt-1">Multi-Module MCP Gateway</p>
           <p className="text-[9px] text-slate-500 mt-1 leading-tight">Simulated client evaluation token. Not a verified human ID.</p>
         </div>
       </aside>
 
       {/* 2. Main Content Viewport */}
-      <main className="flex-1 flex flex-col h-full overflow-hidden bg-slate-50">
-        {/* Top Header Bar */}
-        <header className="h-12 bg-white border-b border-slate-200 px-6 flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-2 text-xs text-slate-600">
-            <span className="font-semibold text-slate-900">Payments Gateway</span>
-            <span>/</span>
-            <span className="capitalize">{activeTab}</span>
-          </div>
-          <div className="flex items-center gap-4 text-xs">
-            <div className="flex items-center gap-1.5 text-slate-600">
-              <Server className="w-3.5 h-3.5 text-teal-600" />
-              <span className="font-mono text-[11px]">Streamable HTTP MCP: /mcp</span>
-            </div>
-            <div className="h-4 w-px bg-slate-200"></div>
-            <div className="flex items-center gap-2 text-[11px] bg-slate-100 border border-slate-200 px-2.5 py-1 rounded">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-              <span className="font-medium text-slate-700">Simulated Sandbox Session:</span>
-              <span className="font-mono text-teal-700 font-semibold">compliance_officer_sandbox</span>
-              <span className="text-[10px] text-slate-400 font-mono hidden md:inline">({DEMO_ANALYST_TOKEN.slice(0, 16)}...)</span>
-            </div>
-          </div>
-        </header>
+      <div className="flex-1 flex flex-col h-full overflow-hidden bg-slate-50">
+        {selectedModule === 'PAYMENTS' ? (
+          <>
+            {/* Horizontal Secondary Navigation for Payments */}
+            <div className="bg-white border-b border-slate-200 px-4 py-2 flex items-center justify-between shrink-0 overflow-x-auto gap-2 shadow-2xs">
+              <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+                <button
+                  onClick={() => setActiveTab('overview')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md transition-colors whitespace-nowrap ${
+                    activeTab === 'overview'
+                      ? 'bg-teal-600 text-white font-semibold shadow-2xs'
+                      : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900 font-medium'
+                  }`}
+                >
+                  <Layers className="w-3.5 h-3.5 shrink-0" />
+                  <span>Overview & Queue</span>
+                </button>
 
-        {/* Ephemeral Preview Warning Banner */}
-        <div className="bg-amber-50 border-b border-amber-200 px-6 py-2 flex items-center justify-between text-xs text-amber-900">
-          <div className="flex items-center gap-2">
-            <Info className="w-4 h-4 text-amber-700 shrink-0" />
-            <span>
-              <strong>Public Synthetic Demo Mode:</strong> In-memory state with local snapshot bundles. Shared demo token is an evaluation fixture, not a production security boundary. Custom remote network egress is locked to prevent SSRF vulnerabilities.
-            </span>
-          </div>
-          <span className="text-[10px] font-mono text-amber-700 bg-amber-100 px-2 py-0.5 rounded shrink-0 ml-2">
-            SSRF_PROTECTED · DEMO_DATA_ONLY
-          </span>
-        </div>
+                <button
+                  onClick={() => setActiveTab('terminal')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md transition-colors whitespace-nowrap ${
+                    activeTab === 'terminal'
+                      ? 'bg-teal-600 text-white font-semibold shadow-2xs'
+                      : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900 font-medium'
+                  }`}
+                >
+                  <Terminal className="w-3.5 h-3.5 shrink-0" />
+                  <span>Single Payment Terminal</span>
+                </button>
+
+                <button
+                  onClick={() => setActiveTab('batch')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md transition-colors whitespace-nowrap ${
+                    activeTab === 'batch'
+                      ? 'bg-teal-600 text-white font-semibold shadow-2xs'
+                      : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900 font-medium'
+                  }`}
+                >
+                  <Database className="w-3.5 h-3.5 shrink-0" />
+                  <span>Batch Ingestion Studio</span>
+                </button>
+
+                <button
+                  onClick={() => setActiveTab('cases')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md transition-colors whitespace-nowrap ${
+                    activeTab === 'cases'
+                      ? 'bg-teal-600 text-white font-semibold shadow-2xs'
+                      : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900 font-medium'
+                  }`}
+                >
+                  <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
+                  <span>Case Adjudication</span>
+                  {cases.length > 0 && (
+                    <span className={`text-[10px] px-1.5 py-0.2 rounded font-mono font-bold ml-1 ${
+                      activeTab === 'cases' ? 'bg-teal-800 text-white' : 'bg-slate-200 text-slate-700'
+                    }`}>
+                      {cases.length}
+                    </span>
+                  )}
+                </button>
+
+                <button
+                  onClick={() => setActiveTab('health')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md transition-colors whitespace-nowrap ${
+                    activeTab === 'health'
+                      ? 'bg-teal-600 text-white font-semibold shadow-2xs'
+                      : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900 font-medium'
+                  }`}
+                >
+                  <RefreshCw className="w-3.5 h-3.5 shrink-0" />
+                  <span>Watchlists & Freshness</span>
+                </button>
+
+                <button
+                  onClick={() => setActiveTab('evidence')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md transition-colors whitespace-nowrap ${
+                    activeTab === 'evidence'
+                      ? 'bg-teal-600 text-white font-semibold shadow-2xs'
+                      : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900 font-medium'
+                  }`}
+                >
+                  <FileCheck className="w-3.5 h-3.5 shrink-0" />
+                  <span>Evidence & Audit Ledger</span>
+                </button>
+
+                <button
+                  onClick={() => setActiveTab('admin')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md transition-colors whitespace-nowrap ${
+                    activeTab === 'admin'
+                      ? 'bg-teal-600 text-white font-semibold shadow-2xs'
+                      : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900 font-medium'
+                  }`}
+                >
+                  <Server className="w-3.5 h-3.5 shrink-0" />
+                  <span>Admin & Diagnostics</span>
+                </button>
+              </div>
+
+              <div className="flex items-center gap-3 text-xs shrink-0">
+                <div className="flex items-center gap-1.5 text-slate-500 font-mono text-[11px]">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                  <span className="hidden md:inline">MCP:</span> <span>/mcp</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Ephemeral Warning Banner */}
+            <div className="bg-amber-50 border-b border-amber-200 px-6 py-2 flex items-center justify-between text-xs text-amber-900 shrink-0">
+              <div className="flex items-center gap-2">
+                <Info className="w-4 h-4 text-amber-700 shrink-0" />
+                <span>
+                  <strong>Public Synthetic Demo Mode:</strong> In-memory state with local snapshot bundles. Shared demo token is an evaluation fixture, not a production security boundary. Custom remote network egress is locked to prevent SSRF vulnerabilities.
+                </span>
+              </div>
+              <span className="text-[10px] font-mono text-amber-700 bg-amber-100 px-2 py-0.5 rounded shrink-0 ml-2">
+                SSRF_PROTECTED · DEMO_DATA_ONLY
+              </span>
+            </div>
+
+            {/* Payments Main Content Viewport */}
+            <main className="flex-1 flex flex-col h-full overflow-hidden bg-slate-50">
 
         {/* Tab 1: Terminal & Single Payment */}
         {activeTab === 'terminal' && (
@@ -547,80 +652,246 @@ export default function App() {
                     )}
                   </div>
 
-                  {/* 2-Dimensional Evaluation Matrix */}
+                  {/* 2-Dimensional Evaluation Matrix & Evidence Graph */}
                   {screeningResult && (
-                    <div className="bg-white border border-slate-200 rounded p-3 shadow-xs space-y-3">
-                      <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                        <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
-                          2D Screening Evaluation Matrix
-                        </h3>
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => setTerminalResultSubTab('matrix')}
+                            className={`px-3 py-1.5 text-xs font-semibold rounded transition-colors ${
+                              terminalResultSubTab === 'matrix'
+                                ? 'bg-teal-600 text-white shadow-xs'
+                                : 'text-slate-600 hover:bg-slate-100'
+                            }`}
+                          >
+                            2D Evaluation Matrix
+                          </button>
+                          <button
+                            onClick={() => setTerminalResultSubTab('graph')}
+                            className={`px-3 py-1.5 text-xs font-semibold rounded flex items-center gap-1.5 transition-colors ${
+                              terminalResultSubTab === 'graph'
+                                ? 'bg-teal-600 text-white shadow-xs'
+                                : 'text-slate-600 hover:bg-slate-100'
+                            }`}
+                          >
+                            <Share2 className="w-3.5 h-3.5" />
+                            <span>Evidence Graph</span>
+                            {screeningGraph && (
+                              <span className="text-[10px] px-1 rounded bg-teal-800 text-white font-mono">
+                                {screeningGraph.nodes.length}
+                              </span>
+                            )}
+                          </button>
+                        </div>
                         <span className="text-[10px] font-mono text-slate-500">
                           Ref: {screeningResult.referenceId.slice(0, 14)}...
                         </span>
                       </div>
 
-                      <div className="grid grid-cols-2 gap-3">
-                        {/* 1. Coverage Status */}
-                        <div className="p-2.5 rounded border border-slate-200 bg-slate-50">
-                          <span className="text-[10px] text-slate-500 font-medium block">
-                            Dimension 1: List Coverage
-                          </span>
-                          <div className="flex items-center gap-1.5 mt-1">
-                            {screeningResult.coverageStatus === 'COMPLETE' ? (
-                              <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                            ) : (
-                              <AlertTriangle className="w-4 h-4 text-amber-600" />
-                            )}
+                      {terminalResultSubTab === 'graph' && screeningGraph ? (
+                        <EvidenceGraphView graph={screeningGraph} />
+                      ) : (
+                        <div className="bg-white border border-slate-200 rounded p-3 shadow-xs space-y-3">
+                          <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                            <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
+                              2D Screening Evaluation Matrix
+                            </h3>
+                            <span className="text-[10px] font-mono text-slate-500">
+                              Ref: {screeningResult.referenceId.slice(0, 14)}...
+                            </span>
+                          </div>
+
+                      {/* 4 Separate Dimensions: Coverage, Completeness, Match Findings, and Review Decision */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {/* 1. Watchlist Coverage */}
+                        <div className="p-3 rounded border border-slate-200 bg-slate-50">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider block">
+                              1. Watchlist Coverage
+                            </span>
                             <span
-                              className={`text-xs font-bold font-mono ${
+                              className={`text-[10px] font-bold font-mono px-1.5 py-0.5 rounded ${
                                 screeningResult.coverageStatus === 'COMPLETE'
-                                  ? 'text-emerald-700'
-                                  : 'text-amber-700'
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : 'bg-amber-100 text-amber-800'
                               }`}
                             >
                               {screeningResult.coverageStatus}
                             </span>
                           </div>
-                          <p className="text-[10px] text-slate-500 mt-1">
+                          <div className="flex items-center gap-1.5 mt-1.5">
+                            {screeningResult.coverageStatus === 'COMPLETE' ? (
+                              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                            ) : (
+                              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                            )}
+                            <span className="text-xs font-semibold text-slate-800">
+                              {screeningResult.coverageStatus === 'COMPLETE'
+                                ? 'All Required Watchlists Fresh'
+                                : `Coverage Deficit: ${screeningResult.coverageStatus}`}
+                            </span>
+                          </div>
+                          <p className="text-[10px] text-slate-500 mt-1 leading-snug">
                             {screeningResult.staleLists.length === 0
-                              ? 'All required watchlists are fresh and verified.'
+                              ? 'Watchlist coverage confirms feed availability only; it does not establish release clearance.'
                               : `Warning: Stale lists [${screeningResult.staleLists.join(', ')}]. Known candidate hits are preserved.`}
                           </p>
                         </div>
 
-                        {/* 2. Finding Severity */}
-                        <div className="p-2.5 rounded border border-slate-200 bg-slate-50">
-                          <span className="text-[10px] text-slate-500 font-medium block">
-                            Dimension 2: Finding Severity
-                          </span>
-                          <div className="flex items-center gap-1.5 mt-1">
-                            {screeningResult.findingSeverity === 'EXACT_IDENTIFIER_MATCH' ? (
-                              <ShieldAlert className="w-4 h-4 text-red-600" />
-                            ) : screeningResult.findingSeverity === 'FUZZY_NAME_CANDIDATE' ? (
-                              <AlertTriangle className="w-4 h-4 text-amber-600" />
-                            ) : (
-                              <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                            )}
+                        {/* 2. Required-Data Completeness */}
+                        {(() => {
+                          const criticalIssues = screeningResult.missingDataIssues?.filter((i) => i.severity === 'CRITICAL_MISSING') || [];
+                          const warningIssues = screeningResult.missingDataIssues?.filter((i) => i.severity === 'WARNING_ENRICHMENT') || [];
+                          return (
+                            <div className={`p-3 rounded border ${
+                              criticalIssues.length > 0
+                                ? 'bg-rose-50 border-rose-200'
+                                : warningIssues.length > 0
+                                ? 'bg-amber-50 border-amber-200'
+                                : 'bg-emerald-50 border-emerald-200'
+                            }`}>
+                              <div className="flex items-center justify-between">
+                                <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-600 block">
+                                  2. Required-Data Completeness
+                                </span>
+                                <span
+                                  className={`text-[10px] font-bold font-mono px-1.5 py-0.5 rounded ${
+                                    criticalIssues.length > 0
+                                      ? 'bg-rose-200 text-rose-900'
+                                      : warningIssues.length > 0
+                                      ? 'bg-amber-200 text-amber-900'
+                                      : 'bg-emerald-200 text-emerald-900'
+                                  }`}
+                                >
+                                  {criticalIssues.length > 0
+                                    ? `NEEDS INFO (${criticalIssues.length} CRITICAL)`
+                                    : warningIssues.length > 0
+                                    ? `PARTIAL (${warningIssues.length} WARNINGS)`
+                                    : 'DATA COMPLETE'}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1.5 mt-1.5">
+                                {criticalIssues.length > 0 ? (
+                                  <ShieldAlert className="w-4 h-4 text-rose-600 shrink-0" />
+                                ) : (
+                                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                                )}
+                                <span className="text-xs font-semibold text-slate-800">
+                                  {criticalIssues.length > 0
+                                    ? `${criticalIssues.length} Critical Missing Field(s)`
+                                    : 'Mandatory FATF Rec 16 Data Present'}
+                                </span>
+                              </div>
+                              <p className="text-[10px] text-slate-600 mt-1 leading-snug">
+                                {criticalIssues.length > 0
+                                  ? `Missing mandatory originator/beneficiary data: ${criticalIssues.map((c) => c.field).join(', ')}. Automatic release prohibited.`
+                                  : 'Originator and beneficiary accounts, names, and identifiers meet minimum wire standards.'}
+                              </p>
+                            </div>
+                          );
+                        })()}
+
+                        {/* 3. Match Findings */}
+                        <div className="p-3 rounded border border-slate-200 bg-slate-50">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider block">
+                              3. Match Findings
+                            </span>
                             <span
-                              className={`text-xs font-bold font-mono ${
+                              className={`text-[10px] font-bold font-mono px-1.5 py-0.5 rounded ${
                                 screeningResult.findingSeverity === 'EXACT_IDENTIFIER_MATCH'
-                                  ? 'text-red-700'
+                                  ? 'bg-rose-100 text-rose-800'
                                   : screeningResult.findingSeverity === 'FUZZY_NAME_CANDIDATE'
-                                  ? 'text-amber-700'
-                                  : 'text-emerald-700'
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-emerald-100 text-emerald-800'
                               }`}
                             >
                               {screeningResult.findingSeverity}
                             </span>
                           </div>
-                          <p className="text-[10px] text-slate-500 mt-1">
+                          <div className="flex items-center gap-1.5 mt-1.5">
+                            {screeningResult.findingSeverity === 'EXACT_IDENTIFIER_MATCH' ? (
+                              <ShieldAlert className="w-4 h-4 text-rose-600 shrink-0" />
+                            ) : screeningResult.findingSeverity === 'FUZZY_NAME_CANDIDATE' ? (
+                              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                            ) : (
+                              <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                            )}
+                            <span className="text-xs font-semibold text-slate-800">
+                              {screeningResult.findingSeverity === 'EXACT_IDENTIFIER_MATCH'
+                                ? 'Exact Identifier Sanctions Match'
+                                : screeningResult.findingSeverity === 'FUZZY_NAME_CANDIDATE'
+                                ? `Candidate Name Match (${Math.round(screeningResult.highestScore * 100)}%)`
+                                : 'No Matching Watchlist Entries'}
+                            </span>
+                          </div>
+                          <p className="text-[10px] text-slate-500 mt-1 leading-snug">
                             {screeningResult.findingSeverity === 'EXACT_IDENTIFIER_MATCH'
-                              ? 'Critical exact identifier hit. Automated bypass strictly prohibited.'
+                              ? 'Critical candidate identifier hit. Automated bypass strictly prohibited.'
                               : screeningResult.findingSeverity === 'FUZZY_NAME_CANDIDATE'
-                              ? 'Name similarity candidate exceeding threshold. Human review required.'
-                              : 'No matching records observed on active watchlists.'}
+                              ? 'Candidate name similarity above review threshold. Human review required.'
+                              : 'No matches found against OFAC, EU, UN, UK or active sanctions lists.'}
                           </p>
                         </div>
+
+                        {/* 4. Review / Routing Decision */}
+                        {(() => {
+                          const criticalIssues = screeningResult.missingDataIssues?.filter((i) => i.severity === 'CRITICAL_MISSING') || [];
+                          const isBlocked = screeningResult.findingSeverity === 'EXACT_IDENTIFIER_MATCH';
+                          const needsInfo = criticalIssues.length > 0;
+                          const requiresReview = screeningResult.requiresHumanReview || needsInfo || isBlocked || screeningResult.coverageStatus === 'INSUFFICIENT';
+
+                          let decisionBadge = 'ELIGIBLE FOR RELEASE';
+                          let badgeStyle = 'bg-emerald-100 text-emerald-800 border-emerald-300';
+                          let title = 'Automatic Straight-Through Clearance';
+                          let explanation = 'All required customer identity fields are complete and no sanctions candidates were detected.';
+
+                          if (isBlocked) {
+                            decisionBadge = 'HUMAN_ONLY_BLOCK';
+                            badgeStyle = 'bg-rose-100 text-rose-800 border-rose-300';
+                            title = 'Prohibited Identifier Candidate Block';
+                            explanation = 'Sanctions hit detected. Automatic release or agent override is prohibited by legal policy.';
+                          } else if (needsInfo) {
+                            decisionBadge = 'NEEDS INFORMATION (HOLD)';
+                            badgeStyle = 'bg-rose-100 text-rose-800 border-rose-300';
+                            title = 'Human Review Required: Data Incomplete';
+                            explanation = `Watchlist coverage is COMPLETE, but payment CANNOT be released due to ${criticalIssues.length} critical missing field(s) [${criticalIssues.map((c) => c.field).join(', ')}].`;
+                          } else if (requiresReview) {
+                            decisionBadge = 'HUMAN REVIEW REQUIRED';
+                            badgeStyle = 'bg-amber-100 text-amber-800 border-amber-300';
+                            title = 'Human Review Required';
+                            explanation = screeningResult.coverageStatus === 'INSUFFICIENT'
+                              ? 'Screening coverage is INSUFFICIENT (unprofiled message envelope). Manual review required.'
+                              : 'Watchlist candidate similarity requires manual analyst adjudication.';
+                          }
+
+                          return (
+                            <div className={`p-3 rounded border ${isBlocked || needsInfo ? 'bg-rose-50/70 border-rose-300' : requiresReview ? 'bg-amber-50/70 border-amber-300' : 'bg-emerald-50/70 border-emerald-300'}`}>
+                              <div className="flex items-center justify-between">
+                                <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-700 block">
+                                  4. Review & Routing Decision
+                                </span>
+                                <span className={`text-[10px] font-bold font-mono px-1.5 py-0.5 rounded border ${badgeStyle}`}>
+                                  {decisionBadge}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1.5 mt-1.5">
+                                {isBlocked || needsInfo ? (
+                                  <ShieldAlert className="w-4 h-4 text-rose-700 shrink-0" />
+                                ) : requiresReview ? (
+                                  <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+                                ) : (
+                                  <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+                                )}
+                                <span className="text-xs font-bold text-slate-900">{title}</span>
+                              </div>
+                              <p className="text-[10px] text-slate-700 mt-1 leading-snug font-medium">
+                                {explanation}
+                              </p>
+                            </div>
+                          );
+                        })()}
                       </div>
 
                       {/* Disclaimer */}
@@ -629,6 +900,8 @@ export default function App() {
                       </p>
                     </div>
                   )}
+                </div>
+              )}
 
                   {/* Travel Rule Missing Data Issues */}
                   <div className="bg-white border border-slate-200 rounded p-3 shadow-xs">
@@ -905,6 +1178,7 @@ export default function App() {
                     onClick={() => {
                       setSelectedCase(c);
                       setAdjudicateSuccess(null);
+                      fetchCaseGraph(c.caseId);
                     }}
                     className={`w-full text-left p-3 transition-colors ${
                       selectedCase?.caseId === c.caseId ? 'bg-teal-50 border-l-4 border-teal-600' : 'hover:bg-slate-50'
@@ -969,8 +1243,59 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Side-by-side Evidence Comparison */}
-                  <div className="grid grid-cols-2 gap-4">
+                  {/* Case Adjudication Sub-tabs */}
+                  <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setCaseDetailSubTab('details')}
+                        className={`px-3 py-1.5 text-xs font-semibold rounded transition-colors ${
+                          caseDetailSubTab === 'details'
+                            ? 'bg-teal-600 text-white shadow-xs'
+                            : 'text-slate-600 hover:bg-slate-100'
+                        }`}
+                      >
+                        Side-by-Side Review
+                      </button>
+                      <button
+                        onClick={() => {
+                          setCaseDetailSubTab('graph');
+                          if (!caseGraph && selectedCase) {
+                            fetchCaseGraph(selectedCase.caseId);
+                          }
+                        }}
+                        className={`px-3 py-1.5 text-xs font-semibold rounded flex items-center gap-1.5 transition-colors ${
+                          caseDetailSubTab === 'graph'
+                            ? 'bg-teal-600 text-white shadow-xs'
+                            : 'text-slate-600 hover:bg-slate-100'
+                        }`}
+                      >
+                        <Share2 className="w-3.5 h-3.5" />
+                        <span>Evidence Graph</span>
+                        {caseGraph && (
+                          <span className="text-[10px] px-1 rounded bg-teal-800 text-white font-mono">
+                            {caseGraph.nodes.length}
+                          </span>
+                        )}
+                      </button>
+                    </div>
+
+                    <button
+                      onClick={() => handleDownloadEvidence(selectedCase.caseId)}
+                      className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded hover:bg-slate-50 shadow-2xs"
+                    >
+                      <Download className="w-3.5 h-3.5 text-teal-600" />
+                      <span>Evidence Pack (JSON)</span>
+                    </button>
+                  </div>
+
+                  {caseDetailSubTab === 'graph' && caseGraph ? (
+                    <EvidenceGraphView
+                      graph={caseGraph}
+                      onExportJson={() => handleDownloadEvidence(selectedCase.caseId)}
+                    />
+                  ) : (
+                    /* Side-by-side Evidence Comparison */
+                    <div className="grid grid-cols-2 gap-4">
                     {/* Left: Raw Payment Data */}
                     <div className="bg-white border border-slate-200 rounded p-4 shadow-xs">
                       <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider mb-2">
@@ -1037,6 +1362,7 @@ export default function App() {
                       )}
                     </div>
                   </div>
+                  )}
 
                   {/* Adjudication Form */}
                   <form onSubmit={handleAdjudicateSubmit} className="bg-white border border-slate-200 rounded p-4 shadow-xs space-y-4">
@@ -1244,34 +1570,166 @@ export default function App() {
                   Batch Execution Summary ({batchResults.length} Transactions)
                 </div>
                 <div className="divide-y divide-slate-100">
-                  {batchResults.map((r, i) => (
-                    <div key={i} className="p-3 text-xs flex items-center justify-between">
-                      <div>
-                        <span className="font-mono font-bold text-slate-900">
-                          {r.transaction.transactionId}
-                        </span>
-                        <div className="text-[10px] text-slate-500 font-mono">
-                          {r.transaction.messageType} · {r.transaction.currency} {r.transaction.amount}
+                  {batchResults.map((r, i) => {
+                    const criticalIssues = r.screeningResult.missingDataIssues?.filter((it: any) => it.severity === 'CRITICAL_MISSING') || [];
+                    const warningIssues = r.screeningResult.missingDataIssues?.filter((it: any) => it.severity === 'WARNING_ENRICHMENT') || [];
+                    const isBlocked = r.screeningResult.findingSeverity === 'EXACT_IDENTIFIER_MATCH';
+                    const needsInfo = criticalIssues.length > 0;
+                    const requiresReview = r.screeningResult.requiresHumanReview || needsInfo || isBlocked || r.screeningResult.coverageStatus === 'INSUFFICIENT';
+                    const isExpanded = expandedBatchIndex === i;
+
+                    return (
+                      <div key={i} className="p-3 text-xs flex flex-col gap-2">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <span className="font-mono font-bold text-slate-900">
+                              {r.transaction.transactionId}
+                            </span>
+                            <div className="text-[10px] text-slate-500 font-mono">
+                              {r.transaction.messageType} · {r.transaction.currency} {r.transaction.amount}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            {/* Coverage Dimension */}
+                            <span className={`font-mono text-[10px] px-2 py-0.5 rounded font-semibold ${
+                              r.screeningResult.coverageStatus === 'COMPLETE' ? 'bg-slate-100 text-slate-700' : 'bg-amber-100 text-amber-800'
+                            }`}>
+                              Coverage: {r.screeningResult.coverageStatus}
+                            </span>
+
+                            {/* Data Completeness Dimension */}
+                            <span
+                              className={`font-mono text-[10px] px-2 py-0.5 rounded font-semibold ${
+                                needsInfo
+                                  ? 'bg-rose-100 text-rose-800'
+                                  : warningIssues.length > 0
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-emerald-100 text-emerald-800'
+                              }`}
+                            >
+                              {needsInfo
+                                ? `Needs Info (${criticalIssues.length} Critical)`
+                                : warningIssues.length > 0
+                                ? `Data Warnings (${warningIssues.length})`
+                                : 'Data Complete'}
+                            </span>
+
+                            {/* Match Findings Dimension */}
+                            <span
+                              className={`font-mono text-[10px] px-2 py-0.5 rounded font-bold ${
+                                isBlocked
+                                  ? 'bg-red-100 text-red-800'
+                                  : r.screeningResult.findingSeverity === 'FUZZY_NAME_CANDIDATE'
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-emerald-100 text-emerald-800'
+                              }`}
+                            >
+                              {r.screeningResult.findingSeverity}
+                            </span>
+
+                            {/* Review/Routing Status */}
+                            <span
+                              className={`font-mono text-[10px] px-2.5 py-0.5 rounded font-bold border ${
+                                isBlocked
+                                  ? 'bg-red-50 text-red-700 border-red-300'
+                                  : requiresReview
+                                  ? 'bg-amber-50 text-amber-700 border-amber-300'
+                                  : 'bg-emerald-50 text-emerald-700 border-emerald-300'
+                              }`}
+                            >
+                              {isBlocked
+                                ? 'Prohibited Identifier Block'
+                                : requiresReview
+                                ? 'Human Review Required'
+                                : 'Release Eligible'}
+                            </span>
+
+                            {/* Details Toggle */}
+                            <button
+                              onClick={() => setExpandedBatchIndex(isExpanded ? null : i)}
+                              className="text-[11px] px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-medium ml-1"
+                            >
+                              {isExpanded ? 'Hide Details' : 'View Details'}
+                            </button>
+                          </div>
                         </div>
+
+                        {/* Expandable Details Drawer */}
+                        {isExpanded && (
+                          <div className="mt-2 p-3 bg-slate-50 border border-slate-200 rounded text-xs space-y-3">
+                            <div className="grid grid-cols-2 gap-4">
+                              {/* Parties */}
+                              <div>
+                                <h4 className="font-bold text-slate-700 text-[11px] uppercase mb-1">
+                                  Screened Parties ({r.transaction.parties?.length || 0})
+                                </h4>
+                                <div className="space-y-1">
+                                  {r.transaction.parties?.map((p: any, pIdx: number) => (
+                                    <div key={pIdx} className="p-1.5 bg-white border border-slate-200 rounded text-[11px] flex justify-between">
+                                      <div>
+                                        <span className="font-semibold text-slate-800">{p.name || 'Unnamed Party'}</span>
+                                        <span className="text-[10px] text-slate-500 ml-1">({p.role})</span>
+                                      </div>
+                                      <span className="font-mono text-[10px] text-slate-600">
+                                        {p.identifiers?.map((id: any) => `${id.type}:${id.value}`).join(', ') || 'No Identifiers'}
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+
+                              {/* Missing Data Issues */}
+                              <div>
+                                <h4 className="font-bold text-slate-700 text-[11px] uppercase mb-1">
+                                  Missing Data & Travel Rule Issues ({r.screeningResult.missingDataIssues?.length || 0})
+                                </h4>
+                                {r.screeningResult.missingDataIssues?.length === 0 ? (
+                                  <div className="p-2 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded text-[11px]">
+                                    All mandatory originator and beneficiary fields verified complete.
+                                  </div>
+                                ) : (
+                                  <div className="space-y-1">
+                                    {r.screeningResult.missingDataIssues?.map((iss: any, issIdx: number) => (
+                                      <div key={issIdx} className={`p-1.5 rounded border text-[11px] ${
+                                        iss.severity === 'CRITICAL_MISSING' ? 'bg-rose-50 border-rose-200 text-rose-800' : 'bg-amber-50 border-amber-200 text-amber-800'
+                                      }`}>
+                                        <div className="font-semibold">{iss.field}: {iss.severity}</div>
+                                        <div className="text-[10px]">{iss.description}</div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Decision & Action */}
+                            <div className="pt-2 border-t border-slate-200 flex items-center justify-between text-[11px]">
+                              <span className="text-slate-600">
+                                {needsInfo
+                                  ? `Blocked from auto-release: mandatory customer data missing (${criticalIssues.map((c: any) => c.field).join(', ')}).`
+                                  : requiresReview
+                                  ? 'Manual review required before processing can proceed.'
+                                  : 'Eligible for straight-through payment execution.'}
+                              </span>
+                              {r.screeningResult.caseId && (
+                                <button
+                                  onClick={() => {
+                                    const found = cases.find((c) => c.caseId === r.screeningResult.caseId);
+                                    if (found) setSelectedCase(found);
+                                    setActiveTab('cases');
+                                  }}
+                                  className="text-teal-600 hover:underline font-semibold"
+                                >
+                                  Open Case #{r.screeningResult.caseId} →
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        )}
                       </div>
-                      <div className="flex items-center gap-3">
-                        <span
-                          className={`font-mono text-[10px] px-2 py-0.5 rounded ${
-                            r.screeningResult.findingSeverity === 'EXACT_IDENTIFIER_MATCH'
-                              ? 'bg-red-100 text-red-800'
-                              : r.screeningResult.findingSeverity === 'FUZZY_NAME_CANDIDATE'
-                              ? 'bg-amber-100 text-amber-800'
-                              : 'bg-emerald-100 text-emerald-800'
-                          }`}
-                        >
-                          {r.screeningResult.findingSeverity}
-                        </span>
-                        <span className="font-mono text-[10px] text-slate-600">
-                          Coverage: {r.screeningResult.coverageStatus}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -1466,23 +1924,28 @@ export default function App() {
           </div>
         )}
       </main>
-    </div>
-  ) : (
+    </>
+  ) : selectedModule === 'LISTS_AND_DATA_SOURCES' ? (
     <div className="flex-1 flex flex-col h-full overflow-hidden bg-slate-50">
       <ModuleHeader moduleId={selectedModule} />
       <div className="flex-1 overflow-y-auto">
-        {selectedModule === 'TRADE_AND_CARGO' && <TradeAndCargoWorkspace />}
-        {selectedModule === 'MARITIME' && <MaritimeWorkspace />}
-        {selectedModule === 'AIR_CARGO' && <AirCargoWorkspace />}
-        {selectedModule === 'INSURANCE' && <InsuranceWorkspace />}
-        {selectedModule === 'CRYPTO' && <CryptoWorkspace />}
-        {selectedModule === 'HEALTHCARE' && <HealthcareWorkspace />}
-        {selectedModule === 'SECURITIES' && <SecuritiesWorkspace />}
-        {selectedModule === 'VALIDATION_AND_AUDIT' && <ValidationAndAuditWorkspace />}
+        <ListsAndDataSourcesWorkspace />
       </div>
     </div>
+  ) : (
+    <ModuleWorkspaceShell moduleId={selectedModule}>
+      {selectedModule === 'TRADE_AND_CARGO' && <TradeAndCargoWorkspace />}
+      {selectedModule === 'MARITIME' && <MaritimeWorkspace />}
+      {selectedModule === 'AIR_CARGO' && <AirCargoWorkspace />}
+      {selectedModule === 'INSURANCE' && <InsuranceWorkspace />}
+      {selectedModule === 'CRYPTO' && <CryptoWorkspace />}
+      {selectedModule === 'HEALTHCARE' && <HealthcareWorkspace />}
+      {selectedModule === 'SECURITIES' && <SecuritiesWorkspace />}
+      {selectedModule === 'VALIDATION_AND_AUDIT' && <ValidationAndAuditWorkspace />}
+    </ModuleWorkspaceShell>
   )}
-</div>
+      </div>
+    </div>
   );
 }
 

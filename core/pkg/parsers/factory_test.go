@@ -77,6 +77,29 @@ func TestUnifiedParserFactory_AllMTAndMX(t *testing.T) {
 		t.Fatalf("expected MT103 missing :32A: to fail validation in Go")
 	}
 
+	// 7b. Impossible calendar dates in :32A: must be rejected in Go
+	invalidDateCases := []string{
+		"269932EUR100,00", // Month 99, Day 32
+		"261315EUR100,00", // Month 13
+		"260015EUR100,00", // Month 00
+		"260100EUR100,00", // Day 00
+		"260132EUR100,00", // Day 32
+		"260431EUR100,00", // April 31 (April has 30 days)
+		"260229EUR100,00", // Feb 29 in non-leap year (2026)
+	}
+	for _, badVal := range invalidDateCases {
+		rawBad := fmt.Sprintf("{1:F01DEUTDEDDXXX0000000000}{2:I103HSBCHKHHAXXXN}{4:\n:20:BAD-DATE\n:32A:%s\n:50K:DEBTOR\n:59:CREDITOR\n-}", badVal)
+		if _, _, err := f.ParseMessage(rawBad); err == nil {
+			t.Fatalf("expected impossible date :32A:%s to be rejected in Go, but was accepted", badVal)
+		}
+	}
+
+	// Leap year valid date in Go (2024-02-29) must succeed
+	leapYearValid := "{1:F01DEUTDEDDXXX0000000000}{2:I103HSBCHKHHAXXXN}{4:\n:20:LEAP-DATE\n:32A:240229EUR100,00\n:50K:DEBTOR\n:59:CREDITOR\n-}"
+	if txs, _, err := f.ParseTransactions(leapYearValid); err != nil || len(txs) != 1 || txs[0].SettlementDate != "2024-02-29" {
+		t.Fatalf("expected valid leap year Feb 29 2024 to succeed, got txs=%+v err=%v", txs, err)
+	}
+
 	// 8. pain.001 multi-transaction batch expansion in Go
 	painBatch := `<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.001.001.09"><CstmrCdtTrfInitn><PmtInf><Dbtr><Nm>Batch Debtor</Nm></Dbtr><CdtTrfTxInf><PmtId><EndToEndId>E2E-1</EndToEndId></PmtId><Amt><InstdAmt Ccy="EUR">100.00</InstdAmt></Amt><Cdtr><Nm>Creditor One</Nm></Cdtr></CdtTrfTxInf><CdtTrfTxInf><PmtId><EndToEndId>E2E-2</EndToEndId></PmtId><Amt><InstdAmt Ccy="EUR">200.00</InstdAmt></Amt><Cdtr><Nm>Creditor Two</Nm></Cdtr></CdtTrfTxInf></PmtInf></CstmrCdtTrfInitn></Document>`
 	painTxs, painHdr, err := f.ParseTransactions(painBatch)

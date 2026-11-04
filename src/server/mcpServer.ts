@@ -23,59 +23,15 @@ import { evaluateCryptoTransfer } from './services/modules/cryptoService.ts';
 import { evaluateHealthcareClaim } from './services/modules/healthcareService.ts';
 import { evaluateSecuritiesOrder } from './services/modules/securitiesService.ts';
 import { runValidationAndAuditBenchmark } from './services/modules/validationAndAuditService.ts';
+import { screeningService } from './services/screeningService.ts';
+import { sourceRegistryService } from './services/sourceRegistry.ts';
+import { storageRepository } from './services/storage/storageRepository.ts';
+import { subjectRepositoryService } from './services/subjectRepository.ts';
+import { referenceLookupService } from './services/referenceLookupService.ts';
+import { evidenceGraphService } from './services/evidenceGraphService.ts';
 
-/**
- * Deep PII and sensitive data redaction helper for MCP agent outputs and unauthenticated REST callers.
- * Masks account numbers, national IDs, passport identifiers, local IDs, and sanitizes raw snippets
- * to prevent leakage of unredacted PII into LLM model contexts.
- */
-export function redactSensitiveDataForAgent(obj: any): any {
-  if (obj === null || obj === undefined) return obj;
-  if (typeof obj === 'string') {
-    // Redact IBAN / Account numbers
-    let redacted = obj.replace(/[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}/g, (iban) => `${iban.slice(0, 4)}****${iban.slice(-4)}`);
-    // Redact passport-like strings
-    redacted = redacted.replace(/([A-Z]{2}-DEMO-)\d{5,8}/g, '$1****');
-    // Redact national tax IDs
-    redacted = redacted.replace(/(RU-DEMO-INN-)\d{6,12}/g, '$1****');
-    redacted = redacted.replace(/(CN-DEMO-)\d{10,20}/g, '$1****');
-    return redacted;
-  }
-  if (Array.isArray(obj)) {
-    return obj.map(redactSensitiveDataForAgent);
-  }
-  if (typeof obj === 'object') {
-    const copy: any = {};
-    for (const [key, value] of Object.entries(obj)) {
-      if (key === 'accountNumber' && typeof value === 'string') {
-        copy[key] = value.length > 6 ? `${value.slice(0, 4)}****${value.slice(-3)}` : '****';
-      } else if (key === 'rawSnippet' || key === 'rawMessageSnippet') {
-        // Redact raw snippet lines containing account numbers or IDs
-        if (typeof value === 'string') {
-          copy[key] = value
-            .replace(/\/[A-Z0-9]+/g, '/***REDACTED_ACCOUNT***')
-            .replace(/([A-Z]{2}-DEMO-)\d+/g, '$1****');
-        } else {
-          copy[key] = '[REDACTED_FOR_AGENT_CONTEXT]';
-        }
-      } else if (key === 'identifiers' && Array.isArray(value)) {
-        copy[key] = value.map((id: any) => {
-          if (id.type === 'PASSPORT' || id.type === 'NATIONAL_ID' || id.type === 'TAX_ID' || id.type === 'LOCAL_ACCOUNT') {
-            return {
-              ...id,
-              value: typeof id.value === 'string' && id.value.length > 4 ? `${id.value.slice(0, 3)}****` : '****',
-            };
-          }
-          return id;
-        });
-      } else {
-        copy[key] = redactSensitiveDataForAgent(value);
-      }
-    }
-    return copy;
-  }
-  return obj;
-}
+import { redactSensitiveDataForAgent } from './services/normalizer.ts';
+export { redactSensitiveDataForAgent };
 
 /**
  * MCP Tools Definitions according to the Model Context Protocol specification.
@@ -297,6 +253,89 @@ export const MCP_TOOLS = [
       properties: {},
     },
   },
+  {
+    name: 'screen_name_and_identifiers',
+    description: 'Screens an entity name and typed identifiers across all active official, licensed and internal sanctions sources. Returns complete 4-dimension screening results (input completeness, source coverage, candidate findings, review outcome) pinned to the current active snapshot manifest digest.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Primary entity or personal name to screen' },
+        entityType: { type: 'string', enum: ['INDIVIDUAL', 'ORGANIZATION', 'VESSEL', 'AIRCRAFT'] },
+        country: { type: 'string', description: 'Country of nationality, domicile or registration' },
+        identifiers: { type: 'array', description: 'List of typed identifiers (LEI, TAX_ID, PASSPORT, IMO, NPI, ISIN, etc.)' },
+        sourceIds: { type: 'array', items: { type: 'string' }, description: 'Optional list of specific source IDs to screen against' },
+        tenantId: { type: 'string', description: 'Tenant identifier for private list scope (defaults to "default")' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'list_sources_and_health',
+    description: 'Lists all available official sanctions, licensed watchlists and internal lists with their category, enabled state, current active snapshot version, record count, and freshness/health status.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tenantId: { type: 'string', description: 'Optional tenant scope for private lists' },
+      },
+    },
+  },
+  {
+    name: 'manage_customer_subject',
+    description: 'Registers or updates a customer subject in the persistent register (separate from watchlist entries). Stores customer identifiers and configuration for automated re-screening.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        subjectId: { type: 'string', description: 'Optional unique subject identifier' },
+        primaryName: { type: 'string', description: 'Customer legal or personal name' },
+        entityType: { type: 'string', enum: ['INDIVIDUAL', 'ORGANIZATION', 'VESSEL', 'AIRCRAFT'] },
+        aliases: { type: 'array', items: { type: 'string' } },
+        typedIdentifiers: { type: 'array' },
+        jurisdiction: { type: 'string' },
+        retentionPolicy: { type: 'string', enum: ['PERMANENT', 'ONE_OFF_EPHEMERAL', 'RE_SCREEN_ACTIVE'] },
+        tenantId: { type: 'string', description: 'Tenant identifier for isolation' },
+      },
+      required: ['primaryName'],
+    },
+  },
+  {
+    name: 'rescreen_customer_subject',
+    description: 'Executes scoped re-screening of a registered customer subject against the current active memory search index. Creates a linked new screening run while preserving prior history.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        subjectId: { type: 'string', description: 'ID of the registered customer subject' },
+        tenantId: { type: 'string', description: 'Tenant identifier' },
+      },
+      required: ['subjectId'],
+    },
+  },
+  {
+    name: 'lookup_reference_registry',
+    description: 'Performs corporate or healthcare reference lookup against GLEIF LEI, Companies House, or CMS NPPES directory. Strictly separated from adverse screening findings (adverseFinding: false).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        registry: { type: 'string', enum: ['GLEIF_LEI', 'COMPANIES_HOUSE', 'NPPES_NPI'] },
+        queryId: { type: 'string', description: 'LEI code, UK company number, or 10-digit NPI' },
+      },
+      required: ['registry', 'queryId'],
+    },
+  },
+  {
+    name: 'get_alert_evidence_graph',
+    description: 'Retrieves or generates an Alert Evidence Graph with explicit typed nodes, edges, and provenance for a case, screening run, or module evaluation. Enforces PII redaction for agent contexts.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        graphId: { type: 'string', description: 'ID of an existing saved evidence graph' },
+        caseId: { type: 'string', description: 'ID of a payment or compliance case' },
+        screeningRunId: { type: 'string', description: 'ID of a multi-dimensional screening run' },
+        moduleId: { type: 'string', description: 'Module ID if generating for module evaluation' },
+        evaluationPayload: { type: 'object', description: 'Evaluation result payload if generating dynamically' },
+        tenantId: { type: 'string', description: 'Tenant identifier' },
+      },
+    },
+  },
 ];
 
 /**
@@ -343,28 +382,47 @@ export async function executeMcpTool(name: string, args: any, isAgentCaller = tr
       const refId = args.referenceId;
       if (!refId) throw new Error('Missing referenceId argument.');
       const result = paymentStoreService.resolveReference(refId, isAgentCaller ? 'mcp_agent' : 'analyst');
+      const criticalMissingIssues = result.missingDataIssues?.filter((i: any) => i.severity === 'CRITICAL_MISSING') || [];
+      const hasCriticalMissing = criticalMissingIssues.length > 0;
+      const requiresHumanReview =
+        result.requiresHumanReview ||
+        hasCriticalMissing ||
+        result.findingSeverity !== 'NO_MATCH_FOUND' ||
+        result.coverageStatus === 'INSUFFICIENT';
+
+      let routingAction: 'HUMAN_ONLY_BLOCK' | 'HUMAN_REVIEW_REQUIRED' | 'NO_MATCH_FOUND' = 'NO_MATCH_FOUND';
+      if (result.findingSeverity === 'EXACT_IDENTIFIER_MATCH') {
+        routingAction = 'HUMAN_ONLY_BLOCK';
+      } else if (requiresHumanReview) {
+        routingAction = 'HUMAN_REVIEW_REQUIRED';
+      }
+
+      const blockingIssueCodes = criticalMissingIssues.map((i: any) => i.code || i.field);
+      const requiredCorrections = criticalMissingIssues.map((i: any) => `${i.field}: ${i.description}`);
+
+      let message = 'No matching entries found on active watchlists. Eligible for automated release.';
+      if (result.findingSeverity === 'EXACT_IDENTIFIER_MATCH') {
+        message = 'Critical candidate identifier hit on sanctions list. Automated release or agent override strictly prohibited.';
+      } else if (hasCriticalMissing) {
+        message = `Human review required: ${criticalMissingIssues.length} critical missing data issue(s) detected [${blockingIssueCodes.join(', ')}]. Automatic release prohibited until required originator/beneficiary information is supplied.`;
+      } else if (result.findingSeverity === 'FUZZY_NAME_CANDIDATE') {
+        message = 'Candidate name similarity above threshold. Human compliance review required.';
+      } else if (result.coverageStatus === 'INSUFFICIENT') {
+        message = 'Screening coverage is INSUFFICIENT (unprofiled message envelope or missing mandatory watchlist/party data). Manual compliance review required.';
+      }
+
       const response = {
         referenceId: result.referenceId,
         transactionId: result.transactionId,
         coverageStatus: result.coverageStatus,
         findingSeverity: result.findingSeverity,
-        routingAction:
-          result.findingSeverity === 'EXACT_IDENTIFIER_MATCH'
-            ? 'HUMAN_ONLY_BLOCK'
-            : result.findingSeverity === 'FUZZY_NAME_CANDIDATE' ||
-              result.coverageStatus === 'INSUFFICIENT' ||
-              result.requiresHumanReview
-            ? 'HUMAN_REVIEW_REQUIRED'
-            : 'NO_MATCH_FOUND',
-        requiresHumanReview: result.requiresHumanReview,
-        message:
-          result.findingSeverity === 'EXACT_IDENTIFIER_MATCH'
-            ? 'Critical candidate identifier hit. Automated release or agent override strictly prohibited.'
-            : result.findingSeverity === 'FUZZY_NAME_CANDIDATE'
-            ? 'Candidate name similarity above threshold. Human review required.'
-            : result.coverageStatus === 'INSUFFICIENT'
-            ? 'Screening coverage is INSUFFICIENT (unprofiled message envelope or missing mandatory watchlist/party data). Manual compliance review required.'
-            : 'No matching entries found on active watchlists.',
+        routingAction,
+        requiresHumanReview,
+        hasCriticalMissing,
+        criticalMissingCount: criticalMissingIssues.length,
+        blockingIssueCodes,
+        requiredCorrections,
+        message,
       };
       return response;
     }
@@ -484,6 +542,101 @@ export async function executeMcpTool(name: string, args: any, isAgentCaller = tr
     case 'run_validation_benchmark': {
       const evaluation = runValidationAndAuditBenchmark();
       return isAgentCaller ? redactSensitiveDataForAgent(evaluation) : evaluation;
+    }
+
+    case 'screen_name_and_identifiers': {
+      const run = await screeningService.screenEntity({
+        name: args.name,
+        entityType: args.entityType,
+        country: args.country,
+        identifiers: args.identifiers,
+        sourceIds: args.sourceIds,
+        tenantId: args.tenantId || 'default',
+      });
+      return isAgentCaller ? redactSensitiveDataForAgent(run) : run;
+    }
+
+    case 'list_sources_and_health': {
+      const tenantId = args.tenantId || 'default';
+      const sources = sourceRegistryService.listSources(tenantId);
+      const manifest = storageRepository.getActiveManifest(tenantId);
+      const output = {
+        tenantId,
+        activeSourcesCount: sources.filter((s) => s.enabled).length,
+        totalSourcesCount: sources.length,
+        manifestDigest: manifest.manifestDigest,
+        sources: sources.map((s) => ({
+          id: s.id,
+          name: s.name,
+          category: s.category,
+          enabled: s.enabled,
+          healthStatus: s.healthStatus || 'HEALTHY',
+          activeVersionTag: s.activeVersionTag,
+          recordCount: s.recordCount || 0,
+          authoritativeUrl: s.authoritativeUrl,
+          termsUrl: s.termsUrl,
+        })),
+      };
+      return isAgentCaller ? redactSensitiveDataForAgent(output) : output;
+    }
+
+    case 'manage_customer_subject': {
+      const subject = subjectRepositoryService.registerSubject({
+        tenantId: args.tenantId || 'default',
+        subjectId: args.subjectId,
+        primaryName: args.primaryName,
+        entityType: args.entityType || 'ORGANIZATION',
+        aliases: args.aliases,
+        typedIdentifiers: args.typedIdentifiers,
+        jurisdiction: args.jurisdiction,
+        retentionPolicy: args.retentionPolicy || 'RE_SCREEN_ACTIVE',
+        provenance: 'MCP_TOOL_INVOCATION',
+      });
+      return isAgentCaller ? redactSensitiveDataForAgent(subject) : subject;
+    }
+
+    case 'rescreen_customer_subject': {
+      const tenantId = args.tenantId || 'default';
+      const run = await screeningService.rescreenSubject(args.subjectId, tenantId);
+      return isAgentCaller ? redactSensitiveDataForAgent(run) : run;
+    }
+
+    case 'lookup_reference_registry': {
+      let result;
+      if (args.registry === 'GLEIF_LEI') {
+        result = referenceLookupService.lookupGleif(args.queryId);
+      } else if (args.registry === 'COMPANIES_HOUSE') {
+        result = referenceLookupService.lookupCompaniesHouse(args.queryId);
+      } else if (args.registry === 'NPPES_NPI') {
+        result = referenceLookupService.lookupNppesNpi(args.queryId);
+      } else {
+        throw new Error(`Unsupported reference registry: ${args.registry}. Must be GLEIF_LEI, COMPANIES_HOUSE, or NPPES_NPI.`);
+      }
+      return isAgentCaller ? redactSensitiveDataForAgent(result) : result;
+    }
+
+    case 'get_alert_evidence_graph': {
+      const tenantId = args.tenantId || 'default';
+      let graph: any = null;
+
+      if (args.graphId) {
+        graph = storageRepository.getEvidenceGraph(args.graphId, tenantId);
+      } else if (args.caseId) {
+        const compCase = paymentStoreService.getCase(args.caseId, tenantId);
+        if (!compCase) throw new Error(`Case not found: ${args.caseId}`);
+        graph = evidenceGraphService.buildGraphForPaymentCase(compCase, tenantId);
+      } else if (args.screeningRunId) {
+        const run = storageRepository.getScreeningRun(args.screeningRunId, tenantId);
+        if (!run) throw new Error(`Screening run not found: ${args.screeningRunId}`);
+        graph = evidenceGraphService.buildGraphForScreeningRun(run, tenantId);
+      } else if (args.moduleId && args.evaluationPayload) {
+        graph = evidenceGraphService.buildGraphForModuleEvaluation(args.moduleId, args.evaluationPayload, tenantId);
+      } else {
+        throw new Error('Must provide either graphId, caseId, screeningRunId, or moduleId + evaluationPayload.');
+      }
+
+      if (!graph) throw new Error('Evidence graph could not be resolved or generated.');
+      return isAgentCaller ? evidenceGraphService.redactGraphForAgent(graph) : graph;
     }
 
     default:

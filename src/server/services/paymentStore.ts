@@ -23,6 +23,7 @@ import { auditPaymentMissingData, verifyExtractionCompleteness } from './missing
 import { durableStorage, StorageBackupManifest } from './durableStorage.ts';
 import { sha256 } from './normalizer.ts';
 import { watchlistService } from './watchlist.ts';
+import { evidenceGraphService } from './evidenceGraphService.ts';
 
 interface ServerHeldReference {
   referenceId: string;
@@ -37,7 +38,15 @@ interface ServerHeldReference {
 class PaymentStoreService {
   private cases: Map<string, PaymentComplianceCase> = new Map();
   private references: Map<string, ServerHeldReference> = new Map();
-  private activeEngine: IScreeningEngine = embeddedSyntheticEngine;
+  private _activeEngine?: IScreeningEngine;
+
+  public get activeEngine(): IScreeningEngine {
+    return this._activeEngine || embeddedSyntheticEngine;
+  }
+
+  public set activeEngine(engine: IScreeningEngine) {
+    this._activeEngine = engine;
+  }
   private readonly dataDir = durableStorage.getStateDir();
   private readonly storeFilePath = path.join(this.dataDir, 'payments_store.json');
   private readonly policyVersion = 'POL-2026.11-PAYMENTS';
@@ -65,6 +74,14 @@ class PaymentStoreService {
     const recovered = durableStorage.loadAndRecoverState();
     this.cases = new Map();
     for (const [id, c] of recovered.cases.entries()) {
+      const tenantId = c.tenantId || 'default';
+      const txId = c.transaction?.transactionId;
+      let effectiveId = id;
+      if (txId && !id.startsWith(`case_${tenantId !== 'default' ? tenantId + '_' : ''}`)) {
+        const txHash = crypto.createHash('sha256').update(`${tenantId}:${txId}`).digest('hex').slice(0, 8);
+        effectiveId = `case_${tenantId !== 'default' ? tenantId + '_' : ''}${txId.replace(/[^a-zA-Z0-9_-]/g, '_')}_${txHash}`;
+        c.caseId = effectiveId;
+      }
       // Ensure any legacy pre-schema case on disk has consistent evidenceHash
       if (!this.verifyCaseIntegrity(c).isValid) {
         c.evidenceHash = sha256({
@@ -73,7 +90,7 @@ class PaymentStoreService {
           audit: c.auditTrail,
         });
       }
-      this.cases.set(id, c);
+      this.cases.set(effectiveId, c);
     }
   }
 
@@ -115,7 +132,7 @@ class PaymentStoreService {
     clientId = 'analyst_ui',
     tenantId = 'default'
   ): Promise<PaymentScreeningResult> {
-    const resolvedTenantId = tx.tenantId || tenantId || 'default';
+    const resolvedTenantId = tenantId || tx.tenantId || 'default';
     tx.tenantId = resolvedTenantId;
     const partyOutcomes: PartyScreeningOutcome[] = [];
 
@@ -191,7 +208,10 @@ class PaymentStoreService {
       policyVersion: this.policyVersion,
       listDigests: watchlistService.getListDigests(),
       disclaimer: 'Algorithmic token distance scores are indexing metrics and explicitly NOT a legal-risk probability.',
-      requiresHumanReview: overallSeverity !== 'NO_MATCH_FOUND' || coverageStatus === 'INSUFFICIENT',
+      requiresHumanReview:
+        overallSeverity !== 'NO_MATCH_FOUND' ||
+        coverageStatus === 'INSUFFICIENT' ||
+        tx.missingDataIssues.some((i) => i.severity === 'CRITICAL_MISSING'),
       isRedactedForAgent: false,
       payloadDigest,
       expiresAt: new Date(expiresMs).toISOString(),
@@ -210,7 +230,8 @@ class PaymentStoreService {
 
     // If an alert or missing data is detected, auto-register case for investigation
     if (overallSeverity !== 'NO_MATCH_FOUND' || tx.missingDataIssues.some((i) => i.severity === 'CRITICAL_MISSING')) {
-      this.ensureCaseCreated(tx, result, resolvedTenantId);
+      const createdCase = this.ensureCaseCreated(tx, result, resolvedTenantId);
+      result.caseId = createdCase.caseId;
     }
 
     return result;
@@ -240,15 +261,71 @@ class PaymentStoreService {
 
   /**
    * Creates or updates a case for human compliance review with WAL append before checkpointing.
+   * Prevents case collisions across tenants or sanitization variants and handles rescreening.
    */
   private ensureCaseCreated(
     tx: CanonicalPaymentTransaction,
     screeningResult: PaymentScreeningResult,
     tenantId = 'default'
   ): PaymentComplianceCase {
-    const caseId = `case_${tx.transactionId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-    const existing = this.cases.get(caseId);
-    if (existing) return existing;
+    // Unique deterministic case key incorporating tenantId and transactionId hash
+    const txHash = crypto.createHash('sha256').update(`${tenantId}:${tx.transactionId}`).digest('hex').slice(0, 8);
+    const caseId = `case_${tenantId !== 'default' ? tenantId + '_' : ''}${tx.transactionId.replace(/[^a-zA-Z0-9_-]/g, '_')}_${txHash}`;
+
+    let existing = this.cases.get(caseId);
+    if (!existing) {
+      for (const [existingId, c] of this.cases.entries()) {
+        if ((c.tenantId || 'default') === tenantId && c.transaction.transactionId === tx.transactionId) {
+          existing = c;
+          this.cases.delete(existingId);
+          existing.caseId = caseId;
+          this.cases.set(caseId, existing);
+          break;
+        }
+      }
+    }
+
+    if (existing) {
+      // Rescreening / update: detect changes in amount, currency, parties or severity
+      const now = new Date().toISOString();
+      const prevAction = existing.auditTrail[existing.auditTrail.length - 1];
+      const prevHash = prevAction ? prevAction.serverChecksum : 'GENESIS';
+      const actionId = `act_${crypto.randomUUID()}`;
+      const serverChecksum = sha256(`RESCREEN_${caseId}_${now}_${prevHash}`);
+
+      const rescreenAction: AuditAction = {
+        actionId,
+        timestamp: now,
+        analystId: 'SYSTEM',
+        analystRole: 'system_auditor',
+        previousStatus: existing.status,
+        newStatus: existing.status,
+        decision: 'RESCREENED_UPDATED',
+        rationale: `Transaction rescreened with updated parameters. New amount: ${tx.amount} ${tx.currency}. Severity: ${screeningResult.findingSeverity}.`,
+        serverChecksum,
+        previousHash: prevHash,
+      };
+
+      existing.transaction = JSON.parse(JSON.stringify(tx));
+      existing.screeningResult = JSON.parse(JSON.stringify(screeningResult));
+      existing.updatedAt = now;
+      existing.priority = screeningResult.findingSeverity === 'EXACT_IDENTIFIER_MATCH' ? 'CRITICAL' : existing.priority;
+      existing.auditTrail.push(rescreenAction);
+      existing.evidenceHash = sha256({
+        tx: existing.transaction,
+        screeningResult: existing.screeningResult,
+        audit: existing.auditTrail,
+      });
+
+      durableStorage.appendWal('CASE_UPSERT', tenantId, caseId, existing);
+      try {
+        evidenceGraphService.buildGraphForPaymentCase(existing, tenantId);
+      } catch {
+        // Non-fatal
+      }
+      this.saveStoreToDisk();
+      return existing;
+    }
 
     const now = new Date().toISOString();
 
@@ -283,6 +360,11 @@ class PaymentStoreService {
     };
 
     durableStorage.appendWal('CASE_UPSERT', tenantId, caseId, newCase);
+    try {
+      evidenceGraphService.buildGraphForPaymentCase(newCase, tenantId);
+    } catch {
+      // Non-fatal
+    }
     this.cases.set(caseId, newCase);
     this.saveStoreToDisk();
     return newCase;
@@ -393,6 +475,11 @@ class PaymentStoreService {
     });
 
     durableStorage.appendWal('DECISION_RECORDED', compCase.tenantId || 'default', caseId, compCase);
+    try {
+      evidenceGraphService.buildGraphForPaymentCase(compCase, compCase.tenantId || 'default');
+    } catch {
+      // Non-fatal
+    }
     this.saveStoreToDisk();
     return compCase;
   }
@@ -405,7 +492,7 @@ class PaymentStoreService {
 
     for (let i = 0; i < compCase.auditTrail.length; i++) {
       const act = compCase.auditTrail[i];
-      if (i > 0 && act.previousHash !== expectedPrev) {
+      if (act.previousHash !== expectedPrev) {
         return {
           isValid: false,
           reason: `Hash chain broken at action ${act.actionId}: expected previousHash ${expectedPrev}, found ${act.previousHash}`,

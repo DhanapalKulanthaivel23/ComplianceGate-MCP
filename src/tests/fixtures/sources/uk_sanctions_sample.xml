@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Designations xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" DateGenerated="2026-11-02T12:00:00Z">
+  <Designation>
+    <UniqueID>UK-SAN-9901</UniqueID>
+    <IndividualEntityShip>Entity</IndividualEntityShip>
+    <RegimeName>Russia (Sanctions) (EU Exit) Regulations 2019</RegimeName>
+    <SanctionsImposedIndicator>
+      <AssetFreeze>true</AssetFreeze>
+      <FinancialSanctionsTarget>true</FinancialSanctionsTarget>
+    </SanctionsImposedIndicator>
+    <Names>
+      <Name>
+        <NameType>Primary Name</NameType>
+        <Name6>NORTHERN VOLGA LOGISTICS OOO</Name6>
+      </Name>
+      <Name>
+        <NameType>Alias</NameType>
+        <Name6>VOLGA NORTH FREIGHT</Name6>
+      </Name>
+    </Names>
+    <Addresses>
+      <Address>
+        <AddressLine1>Naberezhnaya 14</AddressLine1>
+        <City>St Petersburg</City>
+        <Country>Russia</Country>
+      </Address>
+    </Addresses>
+    <Identifiers>
+      <Identifier>
+        <Type>Tax ID</Type>
+        <Number>RU-7801992211</Number>
+      </Identifier>
+    </Identifiers>
+    <OtherInformation>Transport provider for Russian defence sector.</OtherInformation>
+  </Designation>
+</Designations>

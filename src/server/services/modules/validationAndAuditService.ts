@@ -11,10 +11,13 @@ import {
 } from '../../../shared/types.ts';
 import { embeddedSyntheticEngine } from '../engineAdapter.ts';
 import { paymentStoreService } from '../paymentStore.ts';
+import { watchlistService } from '../watchlist.ts';
+import { normalizeEntityName, tokenSortRatio } from '../normalizer.ts';
 import { createHash } from 'node:crypto';
 
-// Ground truth synthetic evasion test library aligned with active watchlists
-const BASELINE_EVASION_SPECS: {
+// Fixed ground truth synthetic evasion benchmark library (Specification v2026.11)
+// Note: This is a fixed frozen evaluation benchmark suite, not a dynamic generator.
+export const BASELINE_EVASION_SPECS: {
   typology: EvasionTypology;
   description: string;
   baselineEntity: string;
@@ -33,7 +36,7 @@ const BASELINE_EVASION_SPECS: {
   },
   {
     typology: 'VOWEL_DROPPING',
-    description: 'Abbreviates corporate structure and drops interior vowels',
+    description: 'Abbreviates corporate structure and drops interior vowels in entity name',
     baselineEntity: 'Al-Huda International Trading LLC',
     evasionPayload: 'Al-Huda Intnl Trading LLC',
     targetList: 'DEMO_OFAC_SDN',
@@ -49,15 +52,15 @@ const BASELINE_EVASION_SPECS: {
   },
   {
     typology: 'SPACING_INSERTION',
-    description: 'Inserts whitespace between letters to test fragmentation normalization',
+    description: 'Inserts single whitespace between letters to test fragmentation normalization',
     baselineEntity: 'Oceanic Aurora Maritime Ltd',
     evasionPayload: 'O c e a n i c   A u r o r a   M a r i t i m e',
     targetList: 'DEMO_OFAC_SDN',
     expectedDetection: true,
   },
   {
-    typology: 'VESSEL_IMO_SCRUBBING',
-    description: 'Omits official IMO number while applying commercial prefix alteration to vessel entity',
+    typology: 'COMMERCIAL_PREFIX_ALTERATION',
+    description: 'Commercial vessel entity prefix alteration (M/V) and corporate suffix variation without structured IMO',
     baselineEntity: 'Oceanic Aurora Maritime Ltd',
     evasionPayload: 'M/V Oceanic Aurora Maritime Co',
     targetList: 'DEMO_OFAC_SDN',
@@ -72,16 +75,16 @@ const BASELINE_EVASION_SPECS: {
     expectedDetection: true,
   },
   {
-    typology: 'CONTAINER_PREFIX_DISGUISE',
-    description: 'Alters humanitarian branch terminology in charity trust',
+    typology: 'ORGANIZATIONAL_SUFFIX_VARIATION',
+    description: 'Non-profit trust/foundation organizational branch suffix alteration (Foundation to Trust)',
     baselineEntity: 'Al-Furqan Humanitarian Relief Foundation',
     evasionPayload: 'Al-Furqan Humanitarian Relief Trust',
     targetList: 'DEMO_UN_CONSOLIDATED',
     expectedDetection: true,
   },
   {
-    typology: 'MISSING_ORIGINATOR_ACCOUNT',
-    description: 'Negative control: Completely benign European lighting design supplier',
+    typology: 'BENIGN_NEGATIVE_CONTROL',
+    description: 'Negative control: Unsanctioned benign commercial European lighting design firm without account number',
     baselineEntity: 'Lumen Lighting Design SAS',
     evasionPayload: 'Lumen Lighting Design SAS',
     targetList: 'BENIGN_BASELINE',
@@ -109,15 +112,61 @@ export function runValidationAndAuditBenchmark(): ValidationAndAuditEvaluation {
     };
 
     const outcome = embeddedSyntheticEngine.screenPartySync(canonicalParty);
-    const engineDetected = outcome.matches.length > 0;
-    const passed = engineDetected === spec.expectedDetection;
+
+    // Criteria 2: Verification must verify the INTENDED target entity and source list,
+    // not merely whether any match occurred in the engine.
+    const normalizeListId = (id: string) => {
+      const clean = id.toUpperCase();
+      if (clean === 'DEMO_EU_FSF' || clean === 'EU_FSF') return 'DEMO_EU_FSF';
+      if (clean === 'DEMO_UN_CONSOLIDATED' || clean === 'UN_CONSOLIDATED') return 'DEMO_UN_CONSOLIDATED';
+      if (clean === 'DEMO_OFAC_SDN' || clean === 'OFAC_SDN') return 'DEMO_OFAC_SDN';
+      return clean;
+    };
+
+    const matchingTarget = outcome.matches.find((m) => {
+      const listMatches =
+        m.listId === spec.targetList ||
+        normalizeListId(m.listId) === normalizeListId(spec.targetList) ||
+        m.listId === 'DEMO_SANCTIONS_FIXTURES';
+      const normalizedMatchName = normalizeEntityName(m.entryName || m.listValue);
+      const normalizedBaseline = normalizeEntityName(spec.baselineEntity);
+      const nameMatches =
+        normalizedMatchName.includes(normalizedBaseline) ||
+        normalizedBaseline.includes(normalizedMatchName) ||
+        tokenSortRatio(normalizedMatchName, normalizedBaseline) >= 0.70;
+      return listMatches && nameMatches;
+    });
+
+    const actualDetection = !!matchingTarget;
+    let passed = false;
+    let verdict: 'TRUE_POSITIVE' | 'TRUE_NEGATIVE' | 'FALSE_POSITIVE' | 'FALSE_NEGATIVE' = 'FALSE_NEGATIVE';
+    let failureReason: string | undefined = undefined;
 
     if (spec.expectedDetection) {
-      if (engineDetected) truePositives++;
-      else falseNegatives++;
+      if (actualDetection) {
+        passed = true;
+        verdict = 'TRUE_POSITIVE';
+        truePositives++;
+      } else {
+        passed = false;
+        verdict = 'FALSE_NEGATIVE';
+        falseNegatives++;
+        failureReason = outcome.matches.length > 0
+          ? `Matched unrelated entity or list: "${outcome.matches[0].entryName}" on list "${outcome.matches[0].listId}", expected target "${spec.baselineEntity}" on "${spec.targetList}".`
+          : `No candidates matched above threshold for intended target "${spec.baselineEntity}".`;
+      }
     } else {
-      if (engineDetected) falsePositives++;
-      else trueNegatives++;
+      // Benign negative control: expected no detection on any watchlist
+      if (outcome.matches.length === 0) {
+        passed = true;
+        verdict = 'TRUE_NEGATIVE';
+        trueNegatives++;
+      } else {
+        passed = false;
+        verdict = 'FALSE_POSITIVE';
+        falsePositives++;
+        failureReason = `Benign entity erroneously flagged candidate match: "${outcome.matches[0].entryName}" (${outcome.matches[0].similarityScore}).`;
+      }
     }
 
     testCases.push({
@@ -128,22 +177,50 @@ export function runValidationAndAuditBenchmark(): ValidationAndAuditEvaluation {
       evasionPayload: spec.evasionPayload,
       targetList: spec.targetList,
       expectedDetection: spec.expectedDetection,
-      actualDetection: engineDetected,
-      score: outcome.highestScore,
+      actualDetection,
+      score: matchingTarget ? matchingTarget.similarityScore : outcome.highestScore,
+      matchedEntity: matchingTarget?.entryName || (outcome.matches.length > 0 ? outcome.matches[0].entryName : undefined),
+      matchedList: matchingTarget ? spec.targetList : (outcome.matches.length > 0 ? outcome.matches[0].listId : undefined),
+      matchedScore: matchingTarget?.similarityScore || (outcome.matches.length > 0 ? outcome.matches[0].similarityScore : undefined),
+      verdict,
       passed,
+      failureReason,
     });
   }
 
   const casesPassed = testCases.filter((c) => c.passed).length;
   const casesFailed = testCases.filter((c) => !c.passed).length;
 
-  const precision = truePositives + falsePositives > 0 ? truePositives / (truePositives + falsePositives) : 1.0;
-  const recall = truePositives + falseNegatives > 0 ? truePositives / (truePositives + falseNegatives) : 1.0;
-  const f1Score = precision + recall > 0 ? (2 * precision * recall) / (precision + recall) : 1.0;
-  const falsePositiveRate = falsePositives + trueNegatives > 0 ? falsePositives / (falsePositives + trueNegatives) : 0.0;
+  // Criteria 5: Handle undefined metric denominators explicitly
+  const precision = truePositives + falsePositives > 0
+    ? truePositives / (truePositives + falsePositives)
+    : 1.0;
+  const recall = truePositives + falseNegatives > 0
+    ? truePositives / (truePositives + falseNegatives)
+    : 1.0;
+  const f1Score = precision + recall > 0
+    ? (2 * precision * recall) / (precision + recall)
+    : 0.0;
+  const falsePositiveRate = falsePositives + trueNegatives > 0
+    ? falsePositives / (falsePositives + trueNegatives)
+    : 0.0;
   const meanLatencyMs = (Date.now() - startTime) / testCases.length;
 
-  // Re-verify historical case store ledger integrity
+  // Criteria 4: Dataset and List Snapshots for Reproducibility
+  const activeLists = watchlistService.getAllLists();
+  const listSnapshots = activeLists.map((l) => ({
+    listId: l.id,
+    name: l.name,
+    recordCount: l.recordCount,
+    sha256Digest: l.sha256Digest,
+    isStale: l.isStale,
+  }));
+
+  const datasetDigest = createHash('sha256')
+    .update(JSON.stringify(BASELINE_EVASION_SPECS))
+    .digest('hex');
+
+  // Criteria 6: Audit ledger verification distinguishing empty ledger from verified history
   const allCases = paymentStoreService.listCases();
   let validChains = 0;
   let brokenChains = 0;
@@ -154,8 +231,22 @@ export function runValidationAndAuditBenchmark(): ValidationAndAuditEvaluation {
     else brokenChains++;
   }
 
+  let verificationStatus: ValidationAndAuditEvaluation['historicalLedgerVerification']['verificationStatus'] = 'EMPTY_LEDGER_STANDBY';
+  let verificationDetails = 'Case ledger is currently empty; hash-chain verification standing by.';
+
+  if (allCases.length > 0) {
+    if (brokenChains === 0) {
+      verificationStatus = 'VERIFIED_TAMPER_EVIDENT';
+      verificationDetails = `Verified ${validChains} of ${allCases.length} case audit trails intact via SHA-256 hash chains.`;
+    } else {
+      verificationStatus = 'TAMPER_ALERT';
+      verificationDetails = `Detected ${brokenChains} compromised audit chains out of ${allCases.length} total cases.`;
+    }
+  }
+
   const evidenceDigest = createHash('sha256')
     .update(JSON.stringify({
+      datasetDigest,
       casesPassed,
       casesFailed,
       precision,
@@ -170,6 +261,21 @@ export function runValidationAndAuditBenchmark(): ValidationAndAuditEvaluation {
   return {
     id: `val_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
     timestamp: new Date().toISOString(),
+    engineVersion: 'ComplianceGate-Core v1.4.0 (Synthetic Multi-Module Engine)',
+    policyVersion: 'POL-2026.11-SANCTIONS-FUZZY',
+    thresholdConfig: {
+      exactCutoff: 1.0,
+      fuzzyCutoff: 0.82,
+      tokenSortWeight: 0.5,
+      jaroWinklerWeight: 0.5,
+    },
+    datasetMetadata: {
+      suiteName: 'Fixed Synthetic Sanctions Evasion Benchmark Suite',
+      suiteVersion: 'v2026.11',
+      datasetDigest,
+      isDynamicGenerator: false,
+      listSnapshots,
+    },
     totalCasesTested: testCases.length,
     casesPassed,
     casesFailed,
@@ -180,13 +286,26 @@ export function runValidationAndAuditBenchmark(): ValidationAndAuditEvaluation {
       f1Score: parseFloat(f1Score.toFixed(4)),
       falsePositiveRate: parseFloat(falsePositiveRate.toFixed(4)),
       meanLatencyMs: parseFloat(meanLatencyMs.toFixed(2)),
+      latencyMeasurementScope: 'In-process single-party synchronous fuzzy matching evaluation per case',
+      classCounts: {
+        totalCases: testCases.length,
+        positiveConditionCount: testCases.filter((c) => c.expectedDetection).length,
+        negativeConditionCount: testCases.filter((c) => !c.expectedDetection).length,
+      },
+      confusionMatrix: {
+        truePositives,
+        falsePositives,
+        trueNegatives,
+        falseNegatives,
+      },
     },
     historicalLedgerVerification: {
       totalRecordsAudited: allCases.length,
       chainsIntact: validChains,
       brokenChains,
       tamperDetected: brokenChains > 0,
-      verificationStatus: brokenChains > 0 ? 'TAMPER_ALERT' : 'VERIFIED_TAMPER_EVIDENT',
+      verificationStatus,
+      details: verificationDetails,
     },
     evidenceDigest,
   };
@@ -216,7 +335,7 @@ export interface ExtendedValidationReport {
   };
 }
 
-const EXTENDED_GOLDEN_DATASET: Array<{
+export const EXTENDED_GOLDEN_DATASET: Array<{
   name: string;
   identifiers?: CanonicalParty['identifiers'];
   expectedMatch: boolean;

@@ -46,7 +46,7 @@ export function verifyExtractionCompleteness(tx: CanonicalPaymentTransaction): {
     reasons.push('Transaction lacks extracted primary DEBTOR or CREDITOR party.');
   }
 
-  if (tx.messageType === 'MT202_COV' || tx.messageType === 'PACS_009_COV') {
+  if (tx.messageType === 'MT202_COV' || tx.messageType === 'MT205_COV' || tx.messageType === 'PACS_009_COV') {
     const hasSeqA = tx.parties.some(
       (p) =>
         p.provenance?.sequence === 'A' ||

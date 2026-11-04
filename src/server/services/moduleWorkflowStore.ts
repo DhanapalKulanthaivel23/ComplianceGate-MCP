@@ -189,6 +189,88 @@ export class ModuleWorkflowStore {
   constructor() {
     const recovered = durableStorage.loadAndRecoverState();
     this.workflows = recovered.workflows;
+    if (this.workflows.size === 0) {
+      this.seedDefaultWorkflows();
+    }
+  }
+
+  public seedDefaultWorkflows() {
+    const defaultSeeds: Array<{
+      moduleId: ComplianceModuleId;
+      subjectReference: string;
+      subjectSummary: string;
+      findings: string[];
+      priority: 'CRITICAL' | 'HIGH' | 'MEDIUM';
+    }> = [
+      {
+        moduleId: 'TRADE_AND_CARGO',
+        subjectReference: 'TRD-2026-BL-7701',
+        subjectSummary: 'Bill of Lading: Amber Coast Foods to Silver Birch Exporters',
+        findings: ['Dual-Use Proliferation Warning: HS 8401.20', 'Consignee Sanctions Candidate: Silver Birch Exporters'],
+        priority: 'CRITICAL',
+      },
+      {
+        moduleId: 'MARITIME',
+        subjectReference: 'IMO-9243849',
+        subjectSummary: 'MV Caspian Star (Flag: Panama, MMSI: 352001889)',
+        findings: ['AIS Transponder Blackout > 72h near Gulf of Oman', 'Port History: Bandar Abbas Call Recorded'],
+        priority: 'HIGH',
+      },
+      {
+        moduleId: 'AIR_CARGO',
+        subjectReference: 'AWB-023-99881234',
+        subjectSummary: 'Air Waybill: TransGlobal Freight to Al-Sharq Cargo',
+        findings: ['Consignee Match Candidate: Al-Sharq General Trading LLC (OFAC SDN Match)'],
+        priority: 'CRITICAL',
+      },
+      {
+        moduleId: 'INSURANCE',
+        subjectReference: 'POL-MAR-2026-901',
+        subjectSummary: 'Policy: Oceanic Transatlantic Hull & Machinery Marine Risk',
+        findings: ['Primary Insured Candidate Hit: 25% UBO Sovcomflot PJSC'],
+        priority: 'HIGH',
+      },
+      {
+        moduleId: 'CRYPTO',
+        subjectReference: 'TX-ETH-0x88f2a17b',
+        subjectSummary: 'High-Value Transfer 250 ETH ($750,000 USD)',
+        findings: ['Travel Rule Deficit: Missing Originator VASP IVMS-101 Data', 'Destination Wallet: Mixer Proximity Risk'],
+        priority: 'HIGH',
+      },
+      {
+        moduleId: 'HEALTHCARE',
+        subjectReference: 'CLM-MED-2026-8801',
+        subjectSummary: 'Claim: Comprehensive Orthopedic Clinic ($14,500.00)',
+        findings: ['Practitioner Match: OIG LEIE Mandatory Federal Exclusion List'],
+        priority: 'CRITICAL',
+      },
+      {
+        moduleId: 'SECURITIES',
+        subjectReference: 'ORD-FIX-2026-0044',
+        subjectSummary: 'New Order Single: Sell 50,000 VTB Bank PJSC shares',
+        findings: ['Restricted Instrument: Sectoral Sanctions Identification (SSI) Directive 1 Block'],
+        priority: 'CRITICAL',
+      },
+      {
+        moduleId: 'VALIDATION_AND_AUDIT',
+        subjectReference: 'VAL-BENCH-2026-01',
+        subjectSummary: 'Validation Suite: Quarterly Model & Algorithmic Audit',
+        findings: ['Synthetic Evasion Benchmark: 92.5% Recall', 'Tamper-Evident SHA-256 Ledger: All Chains Intact'],
+        priority: 'MEDIUM',
+      },
+    ];
+
+    for (const seed of defaultSeeds) {
+      this.createWorkflow({
+        moduleId: seed.moduleId,
+        subjectReference: seed.subjectReference,
+        subjectSummary: seed.subjectSummary,
+        findings: seed.findings,
+        priority: seed.priority,
+        tenantId: 'default',
+        actorId: 'SYSTEM_SEED',
+      });
+    }
   }
 
   public createWorkflow(params: {

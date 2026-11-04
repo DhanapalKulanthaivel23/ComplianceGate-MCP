@@ -11,6 +11,28 @@ import {
   PaymentMessageType,
 } from '../../../shared/types.ts';
 import { auditPaymentMissingData } from '../missingDataEngine.ts';
+import { isValidCalendarDate } from './swiftMtParser.ts';
+
+/**
+ * Validates ISO 20022 calendar dates (e.g. <IntrBkSttlmDt> or <ReqdExctnDt>), rejecting impossible dates.
+ */
+export function validateIsoSettlementDate(dateStr: string | null | undefined, tag = 'IntrBkSttlmDt'): string {
+  if (!dateStr || dateStr.trim() === '') {
+    return '2026-11-02';
+  }
+  const clean = dateStr.trim();
+  const m = clean.match(/^(\d{4})[-/]?(\d{2})[-/]?(\d{2})/);
+  if (!m) {
+    throw new Error(`Malformed date format [${clean}] in <${tag}>: expected YYYY-MM-DD.`);
+  }
+  const year = parseInt(m[1], 10);
+  const month = parseInt(m[2], 10);
+  const day = parseInt(m[3], 10);
+  if (!isValidCalendarDate(year, month, day)) {
+    throw new Error(`Invalid settlement date: impossible calendar date [${clean}] in <${tag}>.`);
+  }
+  return `${m[1]}-${m[2]}-${m[3]}`;
+}
 
 /**
  * Unescapes standard XML entities.
@@ -28,7 +50,7 @@ export function unescapeXmlEntities(text: string): string {
 /**
  * Validates XML well-formedness and checks against XXE vulnerabilities.
  */
-export function validateAndSanitizeXml(xml: string, maxSizeBytes = 1024 * 1024): string {
+export function validateAndSanitizeXml(xml: string, maxSizeBytes = 500 * 1024): string {
   if (!xml || typeof xml !== 'string' || xml.trim().length === 0) {
     throw new Error('Empty XML payload provided.');
   }
@@ -49,17 +71,126 @@ export function validateAndSanitizeXml(xml: string, maxSizeBytes = 1024 * 1024):
     throw new Error('Malformed XML: payload does not start and end with standard XML tags.');
   }
 
-  // Strip optional <?xml ...?> prolog to verify root element closure
-  const bodyWithoutProlog = clean.replace(/^<\?xml[^?]*\?>\s*/i, '');
-  const rootOpenMatch = bodyWithoutProlog.match(/^<([a-zA-Z0-9_.:-]+)(?:\s[^>]*)?>/);
-  if (!rootOpenMatch) {
-    throw new Error('Malformed XML: unable to identify root XML element.');
+  // Strip optional <?xml ...?> prolog and valid comments/CDATA while checking for unclosed constructs
+  if (clean.includes('<!--') && !/<!--[\s\S]*?-->/.test(clean)) {
+    throw new Error('Malformed XML: unclosed XML comment.');
   }
-  const rootTagName = rootOpenMatch[1];
-  const escapedRootTag = rootTagName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const rootCloseRegex = new RegExp(`</${escapedRootTag}>\\s*$`, 'i');
-  if (!rootCloseRegex.test(bodyWithoutProlog)) {
-    throw new Error(`Malformed XML: root element <${rootTagName}> is not properly closed.`);
+  if (clean.includes('<![CDATA[') && !/<!\[CDATA\[[\s\S]*?\]\]>/.test(clean)) {
+    throw new Error('Malformed XML: unclosed CDATA section.');
+  }
+
+  const bodyWithoutProlog = clean
+    .replace(/^<\?xml[^?]*\?>\s*/i, '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, (cdata) => 'x'.repeat(cdata.length))
+    .trim();
+
+  if (!bodyWithoutProlog.startsWith('<') || !bodyWithoutProlog.endsWith('>')) {
+    throw new Error('Malformed XML: missing root element after prolog.');
+  }
+
+  // Strict stack-based XML element & attribute well-formedness parser
+  const tagStack: string[] = [];
+  let cursor = 0;
+  const len = bodyWithoutProlog.length;
+  let seenRoot = false;
+
+  while (cursor < len) {
+    const ltIdx = bodyWithoutProlog.indexOf('<', cursor);
+    if (ltIdx === -1) {
+      const trailingText = bodyWithoutProlog.slice(cursor).trim();
+      if (trailingText.length > 0 && tagStack.length === 0) {
+        throw new Error('Malformed XML: unexpected trailing text outside root element.');
+      }
+      break;
+    }
+
+    // Text between cursor and ltIdx must not contain raw '>' if outside tags, and if stack is empty no text is allowed after root
+    const textBetween = bodyWithoutProlog.slice(cursor, ltIdx);
+    if (tagStack.length === 0 && seenRoot && textBetween.trim().length > 0) {
+      throw new Error('Malformed XML: unexpected content after root element closure.');
+    }
+
+    // Find matching '>' respecting quoted attribute values
+    let gtIdx = -1;
+    let inQuote: string | null = null;
+    for (let i = ltIdx + 1; i < len; i++) {
+      const ch = bodyWithoutProlog[i];
+      if (inQuote) {
+        if (ch === inQuote) inQuote = null;
+      } else {
+        if (ch === '"' || ch === "'") {
+          inQuote = ch;
+        } else if (ch === '<') {
+          throw new Error(`Malformed XML: unescaped '<' inside tag starting at position ${ltIdx}.`);
+        } else if (ch === '>') {
+          gtIdx = i;
+          break;
+        }
+      }
+    }
+
+    if (gtIdx === -1 || inQuote !== null) {
+      throw new Error(`Malformed XML: unclosed tag or attribute quote starting at position ${ltIdx}.`);
+    }
+
+    const rawTagContent = bodyWithoutProlog.slice(ltIdx + 1, gtIdx).trim();
+    if (!rawTagContent) {
+      throw new Error(`Malformed XML: empty <> tag at position ${ltIdx}.`);
+    }
+
+    if (rawTagContent.startsWith('?')) {
+      if (!rawTagContent.endsWith('?')) {
+        throw new Error('Malformed XML: unclosed processing instruction.');
+      }
+      cursor = gtIdx + 1;
+      continue;
+    }
+
+    if (rawTagContent.startsWith('/')) {
+      const closeName = rawTagContent.slice(1).trim();
+      if (!/^[a-zA-Z_][a-zA-Z0-9_.:-]*$/.test(closeName)) {
+        throw new Error(`Malformed XML: invalid closing tag name </${closeName}>.`);
+      }
+      if (tagStack.length === 0) {
+        throw new Error(`Malformed XML: unexpected closing tag </${closeName}> with empty element stack.`);
+      }
+      const expectedOpen = tagStack.pop()!;
+      if (expectedOpen !== closeName) {
+        throw new Error(`Malformed XML: mismatched closing tag </${closeName}>; expected </${expectedOpen}>.`);
+      }
+    } else {
+      if (tagStack.length === 0 && seenRoot) {
+        throw new Error('Malformed XML: multiple root elements detected.');
+      }
+      seenRoot = true;
+      const isSelfClosing = rawTagContent.endsWith('/');
+      const coreContent = isSelfClosing ? rawTagContent.slice(0, -1).trim() : rawTagContent;
+      const nameMatch = coreContent.match(/^([a-zA-Z_][a-zA-Z0-9_.:-]*)([\s\S]*)$/);
+      if (!nameMatch) {
+        throw new Error(`Malformed XML: invalid opening tag <${rawTagContent}>.`);
+      }
+      const openName = nameMatch[1];
+      const attrString = nameMatch[2].trim();
+      if (attrString.length > 0) {
+        const attrRemainder = attrString.replace(
+          /[a-zA-Z_][a-zA-Z0-9_.:-]*\s*=\s*(?:"[^"]*"|'[^']*')/g,
+          ''
+        ).trim();
+        if (attrRemainder.length > 0) {
+          throw new Error(`Malformed XML: invalid attribute syntax in <${openName}>.`);
+        }
+      }
+      if (!isSelfClosing) {
+        tagStack.push(openName);
+      }
+    }
+
+    cursor = gtIdx + 1;
+  }
+
+  if (!seenRoot || tagStack.length > 0) {
+    throw new Error(`Malformed XML: unclosed XML elements (${tagStack.join(', ')}).`);
   }
 
   return clean;
@@ -217,20 +348,46 @@ function extractParty(
     });
   }
 
-  const taxId = getTagText(partyBlock, 'OrgId/Othr/Id') || getTagText(partyBlock, 'TaxId');
-  if (taxId) {
+  const orgIdBlock = getTagText(partyBlock, 'OrgId');
+  if (orgIdBlock) {
+    const orgOthrs = getAllTagBlocks(orgIdBlock, 'Othr');
+    for (const othr of orgOthrs) {
+      const idVal = getTagText(othr, 'Id');
+      if (idVal && !identifiers.some((i) => i.value === idVal.trim())) {
+        identifiers.push({
+          type: 'TAX_ID',
+          value: idVal.trim(),
+        });
+      }
+    }
+  }
+  const directTaxId = getTagText(partyBlock, 'TaxId');
+  if (directTaxId && !identifiers.some((i) => i.value === directTaxId.trim())) {
     identifiers.push({
       type: 'TAX_ID',
-      value: taxId.trim(),
+      value: directTaxId.trim(),
     });
   }
 
+  const prvtIdBlock = getTagText(partyBlock, 'PrvtId');
+  if (prvtIdBlock) {
+    const prvtOthrs = getAllTagBlocks(prvtIdBlock, 'Othr');
+    for (const othr of prvtOthrs) {
+      const idVal = getTagText(othr, 'Id');
+      if (idVal && !identifiers.some((i) => i.value === idVal.trim())) {
+        identifiers.push({
+          type: 'PASSPORT',
+          value: idVal.trim(),
+        });
+      }
+    }
+  }
   const passport =
     getTagText(partyBlock, 'PrvtId/DtAndPlcOfBirth/PrvtId/Othr/Id') ||
     getTagText(partyBlock, 'PrvtId/Othr/Id') ||
-    getTagText(partyBlock, 'Othr/Id') ||
+    (!orgIdBlock ? getTagText(partyBlock, 'Othr/Id') : null) ||
     getTagText(partyBlock, 'Passport');
-  if (passport) {
+  if (passport && !identifiers.some((i) => i.value === passport.trim())) {
     identifiers.push({
       type: 'PASSPORT',
       value: passport.trim(),
@@ -317,7 +474,7 @@ export function parsePacs008(xml: string): CanonicalPaymentTransaction[] {
   const versionCheck = verifyIso20022SchemaVersion(safeXml, 'pacs.008', ['001.08', '001.09', '001.10']);
   const grpHdr = getTagText(safeXml, 'GrpHdr') || '';
   const grpMsgId = getTagText(grpHdr, 'MsgId') || `PACS008-${Date.now()}`;
-  const sttlmDt = getTagText(grpHdr, 'IntrBkSttlmDt') || new Date().toISOString().slice(0, 10);
+  const sttlmDt = validateIsoSettlementDate(getTagText(grpHdr, 'IntrBkSttlmDt'), 'IntrBkSttlmDt');
 
   let txBlocks = getAllTagBlocks(safeXml, 'CdtTrfTxInf');
   if (txBlocks.length === 0) {
@@ -388,7 +545,7 @@ export function parsePacs009COV(xml: string): CanonicalPaymentTransaction[] {
   const versionCheck = verifyIso20022SchemaVersion(safeXml, 'pacs.009', ['001.08', '001.09', '001.10']);
   const grpHdr = getTagText(safeXml, 'GrpHdr') || '';
   const grpMsgId = getTagText(grpHdr, 'MsgId') || `PACS009COV-${Date.now()}`;
-  const sttlmDt = getTagText(grpHdr, 'IntrBkSttlmDt') || new Date().toISOString().slice(0, 10);
+  const sttlmDt = validateIsoSettlementDate(getTagText(grpHdr, 'IntrBkSttlmDt'), 'IntrBkSttlmDt');
 
   let txBlocks = getAllTagBlocks(safeXml, 'CdtTrfTxInf');
   if (txBlocks.length === 0) txBlocks = [safeXml];
@@ -736,12 +893,12 @@ export function parseGenericIso20022(xml: string, messageType: PaymentMessageTyp
     getTagText(safeXml, 'Id') ||
     `MX-GEN-${Date.now()}`;
   const uetr = getTagText(safeXml, 'UETR') || getTagText(safeXml, 'OrgnlUETR') || undefined;
-  const sttlmDt =
+  const rawDt =
     getTagText(safeXml, 'IntrBkSttlmDt') ||
     getTagText(safeXml, 'ReqdExctnDt/Dt') ||
     getTagText(safeXml, 'ReqdColltnDt') ||
-    getTagText(safeXml, 'TradDt') ||
-    new Date().toISOString().slice(0, 10);
+    getTagText(safeXml, 'TradDt');
+  const sttlmDt = validateIsoSettlementDate(rawDt, 'IntrBkSttlmDt');
 
   const parties: CanonicalParty[] = [];
   const partyMappings: Array<{ tag: string; role: CanonicalParty['role'] }> = [
@@ -767,15 +924,15 @@ export function parseGenericIso20022(xml: string, messageType: PaymentMessageTyp
 
   const seenRolesAndNames = new Set<string>();
   for (const mapping of partyMappings) {
-    const p = extractParty(safeXml, mapping.tag, mapping.role, 'GenericDocument');
-    if (p) {
+    const extractedList = extractAllParties(safeXml, mapping.tag, mapping.role, 'GenericDocument', 'ROOT');
+    for (const p of extractedList) {
       // Avoid adding an empty Unknown party if only FIId/BIC was inside <Fr>/<To> without <Nm> unless identifiers exist
       if (p.name.startsWith('Unknown ') && p.identifiers.length > 0) {
         p.name = `Financial Institution ${p.identifiers[0].value}`;
         p.originalName = p.name;
       }
       if (!p.name.startsWith('Unknown ') || p.identifiers.length > 0 || p.accountNumber) {
-        const dedupKey = `${p.role}:${p.name}:${p.identifiers.map((i) => i.value).join(',')}`;
+        const dedupKey = `${p.role}:${p.name}:${p.accountNumber || ''}:${p.identifiers.map((i) => i.value).join(',')}:${p.provenance.fieldPath}`;
         if (!seenRolesAndNames.has(dedupKey)) {
           seenRolesAndNames.add(dedupKey);
           parties.push(p);

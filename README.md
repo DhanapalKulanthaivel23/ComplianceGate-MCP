@@ -115,8 +115,7 @@ gcloud run deploy compliancegate-mcp \
 
 ### Cost Controls
 - Cloud Run scales down to zero instances when idle.
-- In preview, the system operates completely in-memory with local snapshot persistence at **£0 cost**.
-- Real commercial watchlists (Dow Jones, World-Check) and live vessel/price feeds remain explicitly disabled stubs until customer enterprise licenses are provided.
+- Real commercial watchlists (Dow Jones, World-Check) and live vessel/price feeds remain explicitly
 
 ---
 

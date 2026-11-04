@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CONSOLIDATED_LIST xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" dateGenerated="2026-11-02T10:00:00Z">
+  <INDIVIDUALS>
+    <INDIVIDUAL>
+      <DATAID>690123</DATAID>
+      <FIRST_NAME>Tariq</FIRST_NAME>
+      <SECOND_NAME>AL-MANSOOR</SECOND_NAME>
+      <UN_LIST_TYPE>ISIL (Da'esh) and Al-Qaida</UN_LIST_TYPE>
+      <INDIVIDUAL_ALIAS>
+        <ALIAS_NAME>Tariq Mansoor</ALIAS_NAME>
+      </INDIVIDUAL_ALIAS>
+      <INDIVIDUAL_DOCUMENT>
+        <TYPE_OF_DOCUMENT>Passport</TYPE_OF_DOCUMENT>
+        <NUMBER>SYR-9921004</NUMBER>
+        <ISSUING_COUNTRY>Syria</ISSUING_COUNTRY>
+      </INDIVIDUAL_DOCUMENT>
+      <INDIVIDUAL_ADDRESS>
+        <COUNTRY>Syria</COUNTRY>
+      </INDIVIDUAL_ADDRESS>
+      <COMMENTS1>Financial facilitator for illicit petroleum shipments.</COMMENTS1>
+    </INDIVIDUAL>
+  </INDIVIDUALS>
+  <ENTITIES>
+    <ENTITY>
+      <DATAID>690555</DATAID>
+      <FIRST_NAME>AL-BARAKA CARGO VENTURES</FIRST_NAME>
+      <UN_LIST_TYPE>Democratic Republic of the Congo</UN_LIST_TYPE>
+      <ENTITY_ALIAS>
+        <ALIAS_NAME>Baraka Freight Line</ALIAS_NAME>
+      </ENTITY_ALIAS>
+      <ENTITY_ADDRESS>
+        <COUNTRY>Somalia</COUNTRY>
+      </ENTITY_ADDRESS>
+      <COMMENTS1>Front company for illicit arms transportation.</COMMENTS1>
+    </ENTITY>
+  </ENTITIES>
+</CONSOLIDATED_LIST>

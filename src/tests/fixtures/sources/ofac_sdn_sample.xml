@@ -1,0 +1,100 @@
+<?xml version="1.0" standalone="yes"?>
+<sdnList xmlns="http://tempuri.org/sdnList.xsd">
+  <publshInformation>
+    <Publish_Date>11/02/2026</Publish_Date>
+    <Record_Count>3</Record_Count>
+  </publshInformation>
+  <sdnEntry>
+    <uid>1001</uid>
+    <firstName>Sergei</firstName>
+    <lastName>IVANOV</lastName>
+    <sdnType>Individual</sdnType>
+    <programList>
+      <program>RUSSIA-EO14024</program>
+    </programList>
+    <akaList>
+      <aka>
+        <uid>10011</uid>
+        <type>a.k.a.</type>
+        <category>strong</category>
+        <lastName>IVANOV, Sergey</lastName>
+      </aka>
+      <aka>
+        <uid>10012</uid>
+        <type>a.k.a.</type>
+        <category>weak</category>
+        <lastName>Иванов Сергей</lastName>
+      </aka>
+    </akaList>
+    <addressList>
+      <address>
+        <uid>10013</uid>
+        <address1>Tverskaya St 12</address1>
+        <city>Moscow</city>
+        <country>Russia</country>
+      </address>
+    </addressList>
+    <idList>
+      <id>
+        <uid>10014</uid>
+        <idType>Passport</idType>
+        <idNumber>RU-77-987654</idNumber>
+        <idCountry>Russia</idCountry>
+      </id>
+      <id>
+        <uid>10015</uid>
+        <idType>Tax ID</idType>
+        <idNumber>770123456789</idNumber>
+        <idCountry>Russia</idCountry>
+      </id>
+    </idList>
+    <remarks>Executive officer of designated military logistics enterprise.</remarks>
+  </sdnEntry>
+  <sdnEntry>
+    <uid>1002</uid>
+    <lastName>BALTIC STAR SHIPPING LTD</lastName>
+    <sdnType>Entity</sdnType>
+    <programList>
+      <program>RUSSIA-EO14024</program>
+      <program>IRAN</program>
+    </programList>
+    <akaList>
+      <aka>
+        <uid>10021</uid>
+        <type>a.k.a.</type>
+        <category>strong</category>
+        <lastName>BALTIC STAR MARITIME</lastName>
+      </aka>
+    </akaList>
+    <idList>
+      <id>
+        <uid>10022</uid>
+        <idType>LEI</idType>
+        <idNumber>984500BALTICSTAR01</idNumber>
+      </id>
+      <id>
+        <uid>10023</uid>
+        <idType>Registration Number</idType>
+        <idNumber>CY-HE-492100</idNumber>
+        <idCountry>Cyprus</idCountry>
+      </id>
+    </idList>
+    <remarks>Operator of shadow fleet oil tankers.</remarks>
+  </sdnEntry>
+  <sdnEntry>
+    <uid>1003</uid>
+    <lastName>MV NEVA TRANSPORTER</lastName>
+    <sdnType>Vessel</sdnType>
+    <programList>
+      <program>RUSSIA-EO14024</program>
+    </programList>
+    <idList>
+      <id>
+        <uid>10031</uid>
+        <idType>IMO</idType>
+        <idNumber>9345678</idNumber>
+      </id>
+    </idList>
+    <remarks>Crude oil tanker; Gross Tonnage 52,000.</remarks>
+  </sdnEntry>
+</sdnList>

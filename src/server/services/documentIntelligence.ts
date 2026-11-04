@@ -98,10 +98,10 @@ export function parseRawTradeDocuments(params: {
   let invoiceNumber = '';
   let invoiceDate = new Date().toISOString().slice(0, 10);
   let sellerName = '';
-  let sellerCountry = 'DE';
+  let sellerCountry = 'UNKNOWN';
   let buyerName = '';
-  let buyerCountry = 'AE';
-  let currency = 'USD';
+  let buyerCountry = 'UNKNOWN';
+  let currency = 'UNKNOWN';
   let totalAmount = 0;
   let invPol: string | undefined;
   let invPod: string | undefined;
@@ -110,13 +110,13 @@ export function parseRawTradeDocuments(params: {
   if (isEdifact) {
     invoiceNumber = matchField(invText, [/BGM\+380\+([^+'"]+)/i], 'EDI-INV-001');
     sellerName = matchField(invText, [/NAD\+SE\+[^+]*\+([^+']+)/i], 'Unknown Seller');
-     sellerCountry = matchField(invText, [/NAD\+SE\+[^+]*\+[^+']*?\+([A-Z]{2})'/i], 'DE');
+    sellerCountry = matchField(invText, [/NAD\+SE\+[^+]*\+[^+']*?\+([A-Z]{2})'/i], 'UNKNOWN');
     buyerName = matchField(invText, [/NAD\+BY\+[^+]*\+([^+']+)/i], 'Unknown Buyer');
-    buyerCountry = matchField(invText, [/NAD\+BY\+[^+]*\+[^+']*?\+([A-Z]{2})'/i], 'AE');
+    buyerCountry = matchField(invText, [/NAD\+BY\+[^+]*\+[^+']*?\+([A-Z]{2})'/i], 'UNKNOWN');
     const moaMatch = invText.match(/MOA\+(?:77|86|9):([0-9.]+):?([A-Z]{3})?/i);
     if (moaMatch) {
       totalAmount = parseNumeric(moaMatch[1]);
-      currency = moaMatch[2] || 'USD';
+      currency = moaMatch[2] || 'UNKNOWN';
     }
     invPol = matchField(invText, [/LOC\+9\+([^+']+)/i]) || undefined;
     invPod = matchField(invText, [/LOC\+11\+([^+']+)/i]) || undefined;
@@ -136,9 +136,9 @@ export function parseRawTradeDocuments(params: {
     ]);
     invoiceDate = matchField(invText, [/Date\s*[:.-]?\s*(\d{4}-\d{2}-\d{2})/i], invoiceDate);
     sellerName = matchField(invText, [/(?:Seller|Exporter|Vendor|Shipper)\s*[:.-]\s*([^\r\n]+)/i]);
-    sellerCountry = matchField(invText, [/(?:Seller|Exporter)\s*Country\s*[:.-]\s*([A-Za-z\s]{2,})/i], 'DE');
+    sellerCountry = matchField(invText, [/(?:Seller|Exporter)\s*Country\s*[:.-]\s*([A-Za-z\s]{2,})/i], 'UNKNOWN');
     buyerName = matchField(invText, [/(?:Buyer|Importer|Consignee|Sold\s*To)\s*[:.-]\s*([^\r\n]+)/i]);
-    buyerCountry = matchField(invText, [/(?:Buyer|Importer)\s*Country\s*[:.-]\s*([A-Za-z\s]{2,})/i], 'AE');
+    buyerCountry = matchField(invText, [/(?:Buyer|Importer)\s*Country\s*[:.-]\s*([A-Za-z\s]{2,})/i], 'UNKNOWN');
     invPol = matchField(invText, [/Port\s*of\s*Loading\s*[:.-]\s*([^\r\n]+)/i]) || undefined;
     invPod = matchField(invText, [/Port\s*of\s*Discharge\s*[:.-]\s*([^\r\n]+)/i]) || undefined;
 
@@ -146,6 +146,11 @@ export function parseRawTradeDocuments(params: {
     if (totalMatch) {
       currency = totalMatch[1].toUpperCase();
       totalAmount = parseNumeric(totalMatch[2]);
+    } else {
+      const numMatch = invText.match(/(?:Total\s*Amount|Invoice\s*Total|Total|Amount)\s*[:.-]?\s*([0-9,]+(?:\.[0-9]{1,2})?)/i);
+      if (numMatch) {
+        totalAmount = parseNumeric(numMatch[1]);
+      }
     }
 
     // Extract line items with HS codes (e.g., "HS: 8401.20 | Gas Centrifuge Rotor | Qty: 4 | Unit: 120000 | Amount: 480000")
@@ -190,12 +195,12 @@ export function parseRawTradeDocuments(params: {
   const blShipper = matchField(blText, [/Shipper\s*[:.-]\s*([^\r\n]+)/i], sellerName);
   const blConsignee = matchField(blText, [/Consignee\s*[:.-]\s*([^\r\n]+)/i], buyerName);
   const notifyParty = matchField(blText, [/Notify\s*Party\s*[:.-]\s*([^\r\n]+)/i]) || undefined;
-  const blPol = matchField(blText, [/Port\s*of\s*Loading\s*[:.-]\s*([^\r\n]+)/i], invPol || 'Hamburg');
-  const blPod = matchField(blText, [/Port\s*of\s*Discharge\s*[:.-]\s*([^\r\n]+)/i], invPod || 'Jebel Ali');
+  const blPol = matchField(blText, [/Port\s*of\s*Loading\s*[:.-]\s*([^\r\n]+)/i], invPol || 'UNKNOWN');
+  const blPod = matchField(blText, [/Port\s*of\s*Discharge\s*[:.-]\s*([^\r\n]+)/i], invPod || 'UNKNOWN');
   const vesselName = matchField(blText, [/Vessel(?:\s*Name)?\s*[:.-]\s*([^\r\n]+)/i]) || undefined;
   const grossWeightKg = parseNumeric(
     matchField(blText, [/Gross\s*Weight\s*[:.-]?\s*([0-9,]+(?:\.[0-9]+)?)\s*(?:KG|KGS)?/i]),
-    1000
+    0
   );
   const cargoDescription = matchField(
     blText,
@@ -208,6 +213,42 @@ export function parseRawTradeDocuments(params: {
       'Document extraction failed: mandatory fields (Invoice Number, Seller, Buyer, or B/L Number) could not be extracted from unstructured payload.'
     );
   }
+
+  if (sellerCountry === 'UNKNOWN') {
+    warnings.push('Seller country not specified in invoice; preserved as UNKNOWN.');
+  }
+  if (buyerCountry === 'UNKNOWN') {
+    warnings.push('Buyer country not specified in invoice; preserved as UNKNOWN.');
+  }
+  if (currency === 'UNKNOWN') {
+    warnings.push('Invoice currency not specified; preserved as UNKNOWN.');
+  }
+  if (blPol === 'UNKNOWN') {
+    warnings.push('Bill of lading port of loading not specified; preserved as UNKNOWN.');
+  }
+  if (blPod === 'UNKNOWN') {
+    warnings.push('Bill of lading port of discharge not specified; preserved as UNKNOWN.');
+  }
+  if (grossWeightKg === 0) {
+    warnings.push('Bill of lading gross weight could not be extracted; preserved as 0 kg.');
+  }
+
+  const coreAttributes = [
+    Boolean(invoiceNumber),
+    Boolean(sellerName),
+    sellerCountry !== 'UNKNOWN',
+    Boolean(buyerName),
+    buyerCountry !== 'UNKNOWN',
+    currency !== 'UNKNOWN',
+    totalAmount > 0,
+    Boolean(blNumber),
+    Boolean(carrierName),
+    blPol !== 'UNKNOWN',
+    blPod !== 'UNKNOWN',
+    grossWeightKg > 0,
+  ];
+  const knownFieldsCount = coreAttributes.filter(Boolean).length;
+  const dynamicConfidence = Math.round((knownFieldsCount / coreAttributes.length) * 100) / 100;
 
   let packingList: EvaluateTradeRequest['packingList'] | undefined;
   if (params.packingListRaw) {
@@ -258,8 +299,8 @@ export function parseRawTradeDocuments(params: {
     tradeRequest,
     metadata: {
       documentFormat: isEdifact ? 'UN_EDIFACT' : invExtracted.detectedFormat,
-      extractionConfidence: 0.96,
-      extractedFieldsCount: 12 + lineItems.length,
+      extractionConfidence: dynamicConfidence,
+      extractedFieldsCount: knownFieldsCount + lineItems.length,
       warnings,
     },
   };
@@ -340,11 +381,31 @@ export function parseRawAirWaybill(rawInput: string | Buffer): {
     : [];
 
   const shipperName = matchField(text, [/Shipper\s*[:.-]\s*([^\r\n]+)/i], 'Unknown Shipper');
+  const shipperCountry = matchField(text, [/(?:Shipper\s*Country|Origin\s*Country)\s*[:.-]?\s*([A-Za-z]{2})/i], 'UNKNOWN');
   const consigneeName = matchField(text, [/Consignee\s*[:.-]\s*([^\r\n]+)/i], 'Unknown Consignee');
+  const consigneeCountry = matchField(text, [/(?:Consignee\s*Country|Destination\s*Country)\s*[:.-]?\s*([A-Za-z]{2})/i], 'UNKNOWN');
   const description = matchField(text, [/(?:Cargo|Nature\s*of\s*Goods|Description)\s*[:.-]\s*([^\r\n]+)/i], 'Air Cargo');
-  const grossWeightKg = parseNumeric(matchField(text, [/Gross\s*Weight\s*[:.-]?\s*([0-9,]+(?:\.[0-9]+)?)/i]), 100);
+  const grossWeightKg = parseNumeric(matchField(text, [/Gross\s*Weight\s*[:.-]?\s*([0-9,]+(?:\.[0-9]+)?)/i]), 0);
   const piecesCount = parseNumeric(matchField(text, [/Pieces\s*[:.-]?\s*([0-9]+)/i]), 1);
   const declaredHsCode = matchField(text, [/HS\s*(?:Code)?\s*[:.-]?\s*(\d{4,10})/i]) || undefined;
+
+  const awbWarnings: string[] = [];
+  if (shipperCountry === 'UNKNOWN') awbWarnings.push('Shipper country not found in Air Waybill; preserved as UNKNOWN.');
+  if (consigneeCountry === 'UNKNOWN') awbWarnings.push('Consignee country not found in Air Waybill; preserved as UNKNOWN.');
+  if (grossWeightKg === 0) awbWarnings.push('Gross weight could not be extracted; preserved as 0 kg.');
+
+  const awbCoreFields = [
+    Boolean(awbNumber),
+    Boolean(originAirport),
+    Boolean(destinationAirport),
+    shipperName !== 'Unknown Shipper',
+    shipperCountry !== 'UNKNOWN',
+    consigneeName !== 'Unknown Consignee',
+    consigneeCountry !== 'UNKNOWN',
+    grossWeightKg > 0,
+    Boolean(description),
+  ];
+  const awbConfidence = Math.round((awbCoreFields.filter(Boolean).length / awbCoreFields.length) * 100) / 100;
 
   return {
     airCargoRequest: {
@@ -352,8 +413,8 @@ export function parseRawAirWaybill(rawInput: string | Buffer): {
       originAirport,
       destinationAirport,
       transitAirports,
-      shipper: { name: shipperName, country: 'AE' },
-      consignee: { name: consigneeName, country: 'DE' },
+      shipper: { name: shipperName, country: shipperCountry },
+      consignee: { name: consigneeName, country: consigneeCountry },
       cargo: {
         description,
         grossWeightKg,
@@ -364,9 +425,9 @@ export function parseRawAirWaybill(rawInput: string | Buffer): {
     },
     metadata: {
       documentFormat: extracted.detectedFormat,
-      extractionConfidence: 0.95,
-      extractedFieldsCount: 9,
-      warnings: [],
+      extractionConfidence: awbConfidence,
+      extractedFieldsCount: awbCoreFields.filter(Boolean).length,
+      warnings: awbWarnings,
     },
   };
 }

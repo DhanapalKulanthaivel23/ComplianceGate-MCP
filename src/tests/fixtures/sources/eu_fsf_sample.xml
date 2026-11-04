@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<export xmlns="http://eu.europa.ec/fpi/fsd/export" generationDate="2026-11-02T08:00:00+01:00">
+  <sanctionEntity logicalId="8801">
+    <subjectType classificationCode="enterprise" />
+    <nameAlias wholeName="RED STAR MICROELECTRONICS JSC" />
+    <nameAlias wholeName="AO KRASNAYA ZVEZDA" />
+    <regulation publicationDate="2026-10-15" entryIntoForceDate="2026-10-16" regulationType="Council Regulation (EU) 2026/888" />
+    <identification identificationTypeCode="Tax ID" identificationTypeCodeExplanation="INN" identificationNumber="7710998877" />
+    <address countryDescription="Russia" />
+    <remark>Manufacturer of dual-use semiconductor controllers.</remark>
+  </sanctionEntity>
+</export>

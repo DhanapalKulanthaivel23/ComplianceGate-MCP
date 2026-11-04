@@ -41,6 +41,14 @@ import { evaluateCryptoTransfer } from './services/modules/cryptoService.ts';
 import { evaluateHealthcareClaim } from './services/modules/healthcareService.ts';
 import { evaluateSecuritiesOrder } from './services/modules/securitiesService.ts';
 import { runValidationAndAuditBenchmark, runExtendedValidationSuite } from './services/modules/validationAndAuditService.ts';
+import { sourceRegistryService } from './services/sourceRegistry.ts';
+import { storageRepository } from './services/storage/storageRepository.ts';
+import { screeningService } from './services/screeningService.ts';
+import { subjectRepositoryService } from './services/subjectRepository.ts';
+import { referenceLookupService } from './services/referenceLookupService.ts';
+import { memorySearchIndex } from './services/memoryIndex.ts';
+import { evidenceGraphService } from './services/evidenceGraphService.ts';
+import { parseCsvLine, parseCsvRecords } from './services/sources/officialParsers.ts';
 
 export interface AppOptions {
   isPublicDemo?: boolean;
@@ -258,8 +266,7 @@ export function createComplianceApp(options: AppOptions = {}): express.Express {
       const clientId = principal ? principal.userId : 'agent_caller';
       const tenantId = principal?.tenantId || tx.tenantId || 'default';
       const result = await paymentStoreService.screenTransaction(tx, clientId, tenantId);
-      const caseId = `case_${tx.transactionId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-      res.json({ ...result, caseId });
+      res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: `Screening execution error: ${err.message}` });
     }
@@ -275,7 +282,46 @@ export function createComplianceApp(options: AppOptions = {}): express.Express {
       const principal = getAuthenticatedPrincipal(req);
       const clientId = principal ? principal.userId : 'agent_caller';
       const result = paymentStoreService.resolveReference(refId, clientId, principal?.tenantId);
-      res.json(result);
+
+      const criticalMissingIssues = result.missingDataIssues?.filter((i: any) => i.severity === 'CRITICAL_MISSING') || [];
+      const hasCriticalMissing = criticalMissingIssues.length > 0;
+      const requiresHumanReview =
+        result.requiresHumanReview ||
+        hasCriticalMissing ||
+        result.findingSeverity !== 'NO_MATCH_FOUND' ||
+        result.coverageStatus === 'INSUFFICIENT';
+
+      let routingAction: 'HUMAN_ONLY_BLOCK' | 'HUMAN_REVIEW_REQUIRED' | 'NO_MATCH_FOUND' = 'NO_MATCH_FOUND';
+      if (result.findingSeverity === 'EXACT_IDENTIFIER_MATCH') {
+        routingAction = 'HUMAN_ONLY_BLOCK';
+      } else if (requiresHumanReview) {
+        routingAction = 'HUMAN_REVIEW_REQUIRED';
+      }
+
+      const blockingIssueCodes = criticalMissingIssues.map((i: any) => i.code || i.field);
+      const requiredCorrections = criticalMissingIssues.map((i: any) => `${i.field}: ${i.description}`);
+
+      let message = 'No matching entries found on active watchlists. Eligible for automated release.';
+      if (result.findingSeverity === 'EXACT_IDENTIFIER_MATCH') {
+        message = 'Critical candidate identifier hit on sanctions list. Automated release or agent override strictly prohibited.';
+      } else if (hasCriticalMissing) {
+        message = `Human review required: ${criticalMissingIssues.length} critical missing data issue(s) detected [${blockingIssueCodes.join(', ')}]. Automatic release prohibited until required originator/beneficiary information is supplied.`;
+      } else if (result.findingSeverity === 'FUZZY_NAME_CANDIDATE') {
+        message = 'Candidate name similarity above threshold. Human compliance review required.';
+      } else if (result.coverageStatus === 'INSUFFICIENT') {
+        message = 'Screening coverage is INSUFFICIENT (unprofiled message envelope or missing mandatory watchlist/party data). Manual compliance review required.';
+      }
+
+      res.json({
+        ...result,
+        routingAction,
+        requiresHumanReview,
+        hasCriticalMissing,
+        criticalMissingCount: criticalMissingIssues.length,
+        blockingIssueCodes,
+        requiredCorrections,
+        message,
+      });
     } catch (err: any) {
       res.status(404).json({ error: err.message });
     }
@@ -417,12 +463,14 @@ export function createComplianceApp(options: AppOptions = {}): express.Express {
       return res.status(403).json({ error: 'Forbidden: Authentication required for tenant evidence.', code: 'TENANT_AUTH_REQUIRED' });
     }
     const integrity = paymentStoreService.verifyCaseIntegrity(compCase);
+    const graph = evidenceGraphService.buildGraphForPaymentCase(compCase, compCase.tenantId || 'default');
     const bundle = {
       packId: `pack_${compCase.caseId}_${Date.now()}`,
       exportedAt: new Date().toISOString(),
       policyVersion: compCase.policyVersion,
       case: compCase,
       integrityVerification: integrity,
+      evidenceGraph: graph,
       disclaimer: 'SYNTHETIC COMPLIANCE GATEWAY EVIDENCE: Demonstrates deterministic audit trail consistency.',
     };
 
@@ -711,7 +759,7 @@ export function createComplianceApp(options: AppOptions = {}): express.Express {
   });
 
   app.get('/api/modules', (req, res) => {
-    res.json(COMPLIANCE_MODULES);
+    res.json(COMPLIANCE_MODULES.filter((m) => m.id !== 'LISTS_AND_DATA_SOURCES'));
   });
 
   // ==========================================
@@ -796,7 +844,7 @@ export function createComplianceApp(options: AppOptions = {}): express.Express {
   });
 
   // Validation & Audit: Synthetic evasion test generation & engine benchmarking
-  app.post('/api/modules/validation/benchmark', (req, res) => {
+  const handleBenchmark = (req: express.Request, res: express.Response) => {
     try {
       const evaluation = runValidationAndAuditBenchmark();
       const safe = isAnalystAuthenticated(req) ? evaluation : redactSensitiveDataForAgent(evaluation);
@@ -804,15 +852,609 @@ export function createComplianceApp(options: AppOptions = {}): express.Express {
     } catch (err: any) {
       res.status(400).json({ error: err.message || 'Validation benchmark failed' });
     }
-  });
+  };
 
-  app.get('/api/modules/validation/extended', (req, res) => {
+  app.post('/api/modules/validation/benchmark', handleBenchmark);
+  app.get('/api/modules/validation/benchmark', handleBenchmark);
+
+  const handleExtended = (req: express.Request, res: express.Response) => {
     try {
       const suite = runExtendedValidationSuite();
       res.json(suite);
     } catch (err: any) {
       res.status(400).json({ error: err.message || 'Extended validation suite failed' });
     }
+  };
+
+  app.get('/api/modules/validation/extended', handleExtended);
+  app.post('/api/modules/validation/extended', handleExtended);
+
+  // ==========================================
+  // Shared Data, Screening & Persistence API
+  // (BUILD-SPEC-LISTS-SCREENING-PERSISTENCE)
+  // ==========================================
+
+  const getEffectiveTenant = (req: express.Request): string => {
+    const principal = getAuthenticatedPrincipal(req);
+    if (principal?.tenantId) return principal.tenantId;
+    const reqHeader = req.headers['x-tenant-id'];
+    if (typeof reqHeader === 'string' && reqHeader.trim()) {
+      const requested = reqHeader.trim();
+      if (requested !== 'default') {
+        if (!principal) {
+          const err: any = new Error('Authentication required for private tenant access');
+          err.statusCode = 401;
+          err.code = 'TENANT_AUTHENTICATION_REQUIRED';
+          throw err;
+        }
+        if (!authService.canAccessTenant(principal, requested)) {
+          const err: any = new Error('Forbidden: Cross-tenant access prohibited');
+          err.statusCode = 403;
+          err.code = 'TENANT_ISOLATION_VIOLATION';
+          throw err;
+        }
+      }
+      return requested;
+    }
+    return 'default';
+  };
+
+  // 1. Sources Catalogue
+  app.get('/api/sources', (req, res) => {
+    try {
+      const tenantId = getEffectiveTenant(req);
+      const sources = sourceRegistryService.listSources(tenantId);
+      res.json({ sources, tenantId });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/sources/manifest', (req, res) => {
+    try {
+      const tenantId = getEffectiveTenant(req);
+      const manifest = storageRepository.getActiveManifest(tenantId);
+      res.json(manifest);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/sources/index-stats', (req, res) => {
+    try {
+      const stats = memorySearchIndex.getStats();
+      res.json(stats);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/sources/index-rebuild', requirePermission('MANAGE_SOURCES'), async (req, res) => {
+    try {
+      const tenantId = getEffectiveTenant(req);
+      const stats = await memorySearchIndex.rebuildIndex(tenantId);
+      res.json({ status: 'REBUILT', stats });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/sources/jobs', (req, res) => {
+    try {
+      const tenantId = getEffectiveTenant(req);
+      const jobs = storageRepository.listImportJobs(tenantId);
+      res.json({ jobs, tenantId });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/sources/:id', (req, res) => {
+    const tenantId = getEffectiveTenant(req);
+    const source = sourceRegistryService.getSource(req.params.id, tenantId);
+    if (!source) return res.status(404).json({ error: `Source not found: ${req.params.id}` });
+    const snapshots = storageRepository.listSnapshots(req.params.id, tenantId);
+    res.json({ source, snapshots });
+  });
+
+  app.post('/api/sources/:id/toggle', requirePermission('MANAGE_SOURCES'), (req, res) => {
+    try {
+      const tenantId = getEffectiveTenant(req);
+      const { enabled } = req.body;
+      const updated = sourceRegistryService.toggleSource(req.params.id, Boolean(enabled), tenantId);
+      res.json(updated);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/sources/upload', requirePermission('MANAGE_SOURCES'), async (req, res) => {
+    try {
+      const tenantId = getEffectiveTenant(req);
+      const principal = getAuthenticatedPrincipal(req);
+      const { sourceId, filename, format, rawContent, autoActivate, bypassQuarantine } = req.body;
+
+      if (!sourceId || !rawContent) {
+        return res.status(400).json({ error: 'sourceId and rawContent are mandatory for upload.' });
+      }
+
+      const result = await sourceRegistryService.ingestAndValidate({
+        sourceId,
+        tenantId,
+        rawContent,
+        filename: filename || 'uploaded_data.csv',
+        format: format || 'CSV',
+        actor: principal?.username || 'analyst',
+        autoActivate: Boolean(autoActivate),
+        bypassQuarantine: Boolean(bypassQuarantine),
+      });
+
+      res.json(result);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/sources/:id/activate', requirePermission('MANAGE_SOURCES'), async (req, res) => {
+    try {
+      const principal = getAuthenticatedPrincipal(req);
+      const { snapshotId } = req.body;
+      if (!snapshotId) return res.status(400).json({ error: 'snapshotId is mandatory for activation.' });
+      const tenantId = getEffectiveTenant(req);
+      const targetSnap = storageRepository.getSnapshot(snapshotId);
+      if (targetSnap && targetSnap.sourceId !== req.params.id) {
+        return res.status(400).json({
+          error: `Foreign snapshot activation rejected: snapshot '${snapshotId}' belongs to source '${targetSnap.sourceId}', not '${req.params.id}'.`,
+          code: 'FOREIGN_SNAPSHOT_REJECTION',
+        });
+      }
+      const manifest = storageRepository.activateSnapshot(snapshotId, principal?.username || 'analyst');
+      await memorySearchIndex.rebuildIndex(tenantId);
+      res.json({ status: 'ACTIVATED', snapshotId, manifest });
+    } catch (err: any) {
+      res.status(err.statusCode || 400).json({ error: err.message, code: err.code });
+    }
+  });
+
+  app.post('/api/sources/:id/rollback', requirePermission('MANAGE_SOURCES'), async (req, res) => {
+    try {
+      const principal = getAuthenticatedPrincipal(req);
+      const { targetSnapshotId } = req.body;
+      if (!targetSnapshotId) return res.status(400).json({ error: 'targetSnapshotId is mandatory for rollback.' });
+      const manifest = storageRepository.rollbackSnapshot(req.params.id, targetSnapshotId, principal?.username || 'analyst');
+      await memorySearchIndex.rebuildIndex(getEffectiveTenant(req));
+      res.json({ status: 'ROLLED_BACK', sourceId: req.params.id, targetSnapshotId, manifest });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  // Official Source Download & Refresh Routes
+  app.post('/api/sources/:id/refresh', requirePermission('MANAGE_SOURCES'), async (req, res) => {
+    try {
+      const principal = getAuthenticatedPrincipal(req);
+      const tenantId = getEffectiveTenant(req);
+      const result = await sourceRegistryService.refreshSource(req.params.id, tenantId, principal?.username || 'analyst');
+      res.json(result);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/sources/refresh-all', requirePermission('MANAGE_SOURCES'), async (req, res) => {
+    try {
+      const tenantId = getEffectiveTenant(req);
+      const results = await sourceRegistryService.refreshAllOfficialSources(tenantId);
+      res.json({ results });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/sources/upload-preview', requirePermission('MANAGE_SOURCES'), (req, res) => {
+    try {
+      const tenantId = getEffectiveTenant(req);
+      const { rawContent, format, sourceId } = req.body;
+      if (!rawContent || !format || !sourceId) {
+        return res.status(400).json({ error: 'rawContent, format, and sourceId are required for preview.' });
+      }
+      const preview = sourceRegistryService.previewUpload(rawContent, format, sourceId, tenantId);
+      res.json(preview);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/sources/create-source', requirePermission('MANAGE_SOURCES'), (req, res) => {
+    try {
+      const tenantId = getEffectiveTenant(req);
+      const { sourceId, name, publisher, category, format, description, isRequired } = req.body;
+      if (!sourceId || !name || !publisher || !category || !format) {
+        return res.status(400).json({ error: 'sourceId, name, publisher, category, and format are mandatory.' });
+      }
+      const newSource = sourceRegistryService.createCustomSource(
+        { sourceId, name, publisher, category, format, description, isRequired },
+        tenantId
+      );
+      res.status(201).json({ status: 'CREATED', source: newSource });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  // 2. Shared Multi-Dimension Name Scanner
+  app.post('/api/sources/scan', async (req, res) => {
+    try {
+      const tenantId = getEffectiveTenant(req);
+      const { name, entityType, country, identifiers, sourceIds } = req.body;
+      const runRecord = await screeningService.screenEntity({
+        name,
+        entityType,
+        country,
+        identifiers,
+        sourceIds,
+        tenantId,
+      });
+
+      const safeResult = isAnalystAuthenticated(req) ? runRecord : redactSensitiveDataForAgent(runRecord);
+      res.json(safeResult);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  // 3. Customer Subject Register (Strict Tenant Isolation)
+  app.get('/api/subjects', requirePermission('VIEW_SUBJECTS'), (req, res) => {
+    try {
+      const tenantId = getEffectiveTenant(req);
+      const subjects = subjectRepositoryService.listSubjects(tenantId);
+      res.json({ subjects, tenantId });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/subjects', requirePermission('MANAGE_SUBJECTS'), (req, res) => {
+    try {
+      const tenantId = getEffectiveTenant(req);
+      const subject = subjectRepositoryService.registerSubject({
+        ...req.body,
+        tenantId,
+      });
+      res.json(subject);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/subjects/:id', requirePermission('VIEW_SUBJECTS'), (req, res) => {
+    const tenantId = getEffectiveTenant(req);
+    const subject = subjectRepositoryService.getSubject(req.params.id, tenantId);
+    if (!subject) return res.status(404).json({ error: `Subject not found: ${req.params.id}` });
+    res.json(subject);
+  });
+
+  app.delete('/api/subjects/:id', requirePermission('MANAGE_SUBJECTS'), (req, res) => {
+    const tenantId = getEffectiveTenant(req);
+    const deleted = subjectRepositoryService.deleteSubject(req.params.id, tenantId);
+    if (!deleted) return res.status(404).json({ error: `Subject not found or access denied: ${req.params.id}` });
+    res.json({ success: true, subjectId: req.params.id });
+  });
+
+  app.post('/api/subjects/:id/screen', requirePermission('SCREEN_TRANSACTION'), async (req, res) => {
+    try {
+      const tenantId = getEffectiveTenant(req);
+      const run = await screeningService.rescreenSubject(req.params.id, tenantId);
+      res.json(run);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/subjects/:id/rescreen', requirePermission('SCREEN_TRANSACTION'), async (req, res) => {
+    try {
+      const tenantId = getEffectiveTenant(req);
+      const run = await screeningService.rescreenSubject(req.params.id, tenantId);
+      res.json(run);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/subjects/rescreen-all', requirePermission('SCREEN_TRANSACTION'), async (req, res) => {
+    try {
+      const tenantId = getEffectiveTenant(req);
+      const result = await screeningService.rescreenAllActiveSubjects(tenantId);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Batch / File Screening Endpoint for Customer Subjects (Intake)
+  app.post('/api/subjects/batch-screen', requirePermission('SCREEN_TRANSACTION'), async (req, res) => {
+    try {
+      const tenantId = getEffectiveTenant(req);
+      let subjectsList: Array<{ id?: string; name: string; entityType?: any; country?: string; identifiers?: any[] }> = [];
+      const rejectedRows: Array<{ rowNumber: number; reason: string }> = [];
+
+      if (Array.isArray(req.body.subjects)) {
+        let rowNum = 1;
+        for (const sub of req.body.subjects) {
+          const name = typeof sub?.name === 'string' ? sub.name.trim() : '';
+          if (!name) {
+            rejectedRows.push({ rowNumber: rowNum, reason: 'Missing mandatory name' });
+          } else {
+            subjectsList.push({
+              ...sub,
+              name,
+              entityType: sub.entityType || 'ORGANIZATION',
+              country: sub.country,
+              identifiers: sub.identifiers || [],
+            });
+          }
+          rowNum++;
+        }
+      } else if (typeof req.body.rawContent === 'string') {
+        const records = parseCsvRecords(req.body.rawContent);
+        if (records.length > 0) {
+          const header = records[0].map((h) => h.trim().toLowerCase());
+          const nameIdx = header.findIndex((h) => h === 'name' || h === 'entity_name' || h === 'full_name');
+          const typeIdx = header.findIndex((h) => h === 'type' || h === 'entity_type');
+          const countryIdx = header.findIndex((h) => h === 'country' || h === 'domicile' || h === 'nationality');
+          const idIdx = header.findIndex((h) => h === 'id' || h === 'identifier');
+
+          if (nameIdx === -1) {
+            return res.status(400).json({ error: 'CSV requires a "name" or "entity_name" header column.' });
+          }
+
+          for (let i = 1; i < records.length; i++) {
+            const cols = records[i];
+            const name = cols[nameIdx]?.trim();
+            if (!name) {
+              rejectedRows.push({ rowNumber: i + 1, reason: 'Missing mandatory name' });
+              continue;
+            }
+            const type = (typeIdx >= 0 && cols[typeIdx]?.trim()) ? cols[typeIdx].trim().toUpperCase() : 'ORGANIZATION';
+            const country = countryIdx >= 0 ? cols[countryIdx]?.trim() : undefined;
+            const idVal = idIdx >= 0 ? cols[idIdx]?.trim() : undefined;
+            const identifiers = idVal ? [{ type: 'REGISTRATION_NO', value: idVal }] : [];
+
+            subjectsList.push({ id: `sub_${i}`, name, entityType: type as any, country, identifiers });
+          }
+        }
+      } else {
+        return res.status(400).json({ error: 'Either subjects array or rawContent CSV string must be provided.' });
+      }
+
+      const results = [];
+      for (const sub of subjectsList) {
+        const record = await screeningService.screenEntity({
+          name: sub.name,
+          entityType: sub.entityType,
+          country: sub.country,
+          identifiers: sub.identifiers,
+          tenantId,
+        });
+        results.push(record);
+      }
+
+      res.json({
+        totalSubmitted: results.length + rejectedRows.length,
+        validCount: results.length,
+        rejectedCount: rejectedRows.length,
+        rejectedRows,
+        results: isAnalystAuthenticated(req) ? results : redactSensitiveDataForAgent(results),
+      });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  // 4. Screening Runs History (Tenant-Scoped)
+  app.get('/api/screenings', requirePermission('VIEW_CASES'), (req, res) => {
+    try {
+      const tenantId = getEffectiveTenant(req);
+      const subjectId = typeof req.query.subjectId === 'string' ? req.query.subjectId : undefined;
+      const runs = storageRepository.listScreeningRuns(tenantId, subjectId);
+      res.json({ runs, tenantId });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/screenings/:id', requirePermission('VIEW_CASES'), (req, res) => {
+    const tenantId = getEffectiveTenant(req);
+    const run = storageRepository.getScreeningRun(req.params.id, tenantId);
+    if (!run) return res.status(404).json({ error: `Screening run not found: ${req.params.id}` });
+    res.json(run);
+  });
+
+  // 5. Reference Lookup Endpoints (Separated from Adverse Findings)
+  app.get('/api/reference/gleif/:lei', (req, res) => {
+    const result = referenceLookupService.lookupGleif(req.params.lei);
+    res.json(result);
+  });
+
+  app.get('/api/reference/companies-house/:num', (req, res) => {
+    const result = referenceLookupService.lookupCompaniesHouse(req.params.num);
+    res.json(result);
+  });
+
+  app.get('/api/reference/nppes/:npi', (req, res) => {
+    const result = referenceLookupService.lookupNppesNpi(req.params.npi);
+    res.json(result);
+  });
+
+  // 6. Storage Persistence & Cloud Capability Status
+  app.get('/api/storage/cloud-status', (req, res) => {
+    const status = storageRepository.getCloudPersistenceStatus();
+    res.json(status);
+  });
+
+  // 7. Alert Evidence Graph Endpoints (Shared Across All Modules)
+  app.get('/api/cases/:id/graph', (req, res) => {
+    const principal = getAuthenticatedPrincipal(req);
+    const compCase = paymentStoreService.getCase(req.params.id);
+    if (!compCase) {
+      return res.status(404).json({ error: `Case not found: ${req.params.id}` });
+    }
+    const tenantId = compCase.tenantId || 'default';
+    if (principal && !authService.canAccessTenant(principal, tenantId)) {
+      return res.status(403).json({ error: 'Forbidden: Cross-tenant graph access prohibited.', code: 'TENANT_ISOLATION_VIOLATION' });
+    }
+
+    let graph = storageRepository.getEvidenceGraphByCaseId(req.params.id, tenantId);
+    if (!graph) {
+      graph = evidenceGraphService.buildGraphForPaymentCase(compCase, tenantId);
+      storageRepository.saveEvidenceGraph(graph);
+    }
+
+    if (principal) {
+      graph = evidenceGraphService.filterGraphForRole(graph, principal.role, tenantId);
+    } else {
+      graph = evidenceGraphService.redactGraphForAgent(graph);
+    }
+    res.json(graph);
+  });
+
+  app.get('/api/screenings/:id/graph', (req, res) => {
+    const principal = getAuthenticatedPrincipal(req);
+    const requestedTenant = principal?.tenantId || (req.query.tenantId as string) || (req.headers['x-tenant-id'] as string) || 'default';
+    if (requestedTenant !== 'default' && !principal) {
+      return res.status(401).json({ error: 'Authentication required to access private tenant screening graph.', code: 'TENANT_AUTHENTICATION_REQUIRED' });
+    }
+    if (principal && !authService.canAccessTenant(principal, requestedTenant)) {
+      return res.status(403).json({ error: 'Forbidden: Cross-tenant graph access prohibited.', code: 'TENANT_ISOLATION_VIOLATION' });
+    }
+    const tenantId = requestedTenant;
+    const run = storageRepository.getScreeningRun(req.params.id, tenantId);
+    if (!run) {
+      return res.status(404).json({ error: `Screening run not found: ${req.params.id}` });
+    }
+
+    let graph = storageRepository.getEvidenceGraphByRunId(req.params.id, tenantId);
+    if (!graph) {
+      graph = evidenceGraphService.buildGraphForScreeningRun(run, tenantId);
+      storageRepository.saveEvidenceGraph(graph);
+    }
+
+    if (principal) {
+      graph = evidenceGraphService.filterGraphForRole(graph, principal.role, tenantId);
+    } else {
+      graph = evidenceGraphService.redactGraphForAgent(graph);
+    }
+    res.json(graph);
+  });
+
+  app.get('/api/graphs/:id', (req, res) => {
+    const principal = getAuthenticatedPrincipal(req);
+    const requestedTenant = principal?.tenantId || (req.query.tenantId as string) || (req.headers['x-tenant-id'] as string) || 'default';
+    if (requestedTenant !== 'default' && !principal) {
+      return res.status(401).json({ error: 'Authentication required to access private tenant graph.', code: 'TENANT_AUTHENTICATION_REQUIRED' });
+    }
+    if (principal && !authService.canAccessTenant(principal, requestedTenant)) {
+      return res.status(403).json({ error: 'Forbidden: Cross-tenant graph access prohibited.', code: 'TENANT_ISOLATION_VIOLATION' });
+    }
+    const graph = storageRepository.getEvidenceGraph(req.params.id, requestedTenant);
+    if (!graph) {
+      return res.status(404).json({ error: `Evidence graph not found: ${req.params.id}` });
+    }
+
+    if (graph.tenantId && graph.tenantId !== 'default' && !principal) {
+      return res.status(401).json({ error: 'Authentication required to access private tenant graph.', code: 'TENANT_AUTHENTICATION_REQUIRED' });
+    }
+    if (principal && !authService.canAccessTenant(principal, graph.tenantId)) {
+      return res.status(403).json({ error: 'Forbidden: Cross-tenant graph access prohibited.', code: 'TENANT_ISOLATION_VIOLATION' });
+    }
+
+    let filtered = principal
+      ? evidenceGraphService.filterGraphForRole(graph, principal.role, requestedTenant)
+      : evidenceGraphService.redactGraphForAgent(graph);
+
+    res.json(filtered);
+  });
+
+  app.get('/api/graphs/:id/export', (req, res) => {
+    const principal = getAuthenticatedPrincipal(req);
+    const requestedTenant = principal?.tenantId || (req.query.tenantId as string) || (req.headers['x-tenant-id'] as string) || 'default';
+    if (requestedTenant !== 'default' && !principal) {
+      return res.status(401).json({ error: 'Authentication required to access private tenant export.', code: 'TENANT_AUTHENTICATION_REQUIRED' });
+    }
+    if (principal && !authService.canAccessTenant(principal, requestedTenant)) {
+      return res.status(403).json({ error: 'Forbidden: Cross-tenant export prohibited.', code: 'TENANT_ISOLATION_VIOLATION' });
+    }
+    const graph = storageRepository.getEvidenceGraph(req.params.id, requestedTenant);
+    if (!graph) {
+      return res.status(404).json({ error: `Evidence graph not found: ${req.params.id}` });
+    }
+
+    if (graph.tenantId && graph.tenantId !== 'default' && !principal) {
+      return res.status(401).json({ error: 'Authentication required for private export.', code: 'TENANT_AUTHENTICATION_REQUIRED' });
+    }
+    if (principal && !authService.canAccessTenant(principal, graph.tenantId)) {
+      return res.status(403).json({ error: 'Forbidden: Cross-tenant export prohibited.', code: 'TENANT_ISOLATION_VIOLATION' });
+    }
+
+    const exportBundle = {
+      packId: `pack_graph_${graph.graphId}_${Date.now()}`,
+      exportedAt: new Date().toISOString(),
+      graph,
+      evidenceDigest: graph.evidenceDigest,
+      disclaimer: 'COMPLIANCEGATE ALERT EVIDENCE GRAPH: Cryptographically sealed provenance and structural adjacency projection.',
+    };
+
+    if (!principal) {
+      return res.json(redactSensitiveDataForAgent(exportBundle));
+    }
+    res.json(exportBundle);
+  });
+
+  app.post('/api/graphs/generate', (req, res) => {
+    const principal = getAuthenticatedPrincipal(req);
+    const requestedTenant = principal?.tenantId || (req.body.tenantId as string) || (req.headers['x-tenant-id'] as string) || 'default';
+    if (requestedTenant !== 'default' && !principal) {
+      return res.status(401).json({ error: 'Authentication required for private tenant graph generation.', code: 'TENANT_AUTHENTICATION_REQUIRED' });
+    }
+    if (principal && !authService.canAccessTenant(principal, requestedTenant)) {
+      return res.status(403).json({ error: 'Forbidden: Cross-tenant graph generation prohibited.', code: 'TENANT_ISOLATION_VIOLATION' });
+    }
+    const tenantId = requestedTenant;
+    const { moduleId, payload } = req.body;
+
+    if (!moduleId || !payload) {
+      return res.status(400).json({ error: 'Missing mandatory moduleId or payload in request body.' });
+    }
+
+    let graph;
+    if (moduleId === 'PAYMENTS' && payload.screeningResult && payload.transaction) {
+      graph = evidenceGraphService.buildGraphForPaymentScreening(payload.screeningResult, payload.transaction, tenantId);
+    } else if (moduleId === 'LISTS_AND_DATA_SOURCES' || (payload.queryEntity && payload.candidates)) {
+      graph = evidenceGraphService.buildGraphForScreeningRun(payload, tenantId);
+    } else {
+      graph = evidenceGraphService.buildGraphForModuleEvaluation(moduleId, payload, tenantId);
+    }
+    const safeGraph = principal ? graph : evidenceGraphService.redactGraphForAgent(graph);
+    res.json(safeGraph);
+  });
+
+  // Catch-all 404 for ANY unmatched /api/* route: ALWAYS returns JSON, never HTML SPA!
+  app.all('/api/*', (req, res) => {
+    res.status(404).json({
+      error: `API endpoint not found: ${req.method} ${req.path}`,
+      availableEndpoints: [
+        '/api/modules/validation/benchmark',
+        '/api/modules/validation/extended',
+        '/api/modules/payments/screen',
+        '/api/modules/trade/evaluate',
+        '/api/modules/maritime/evaluate',
+        '/api/modules/air-cargo/evaluate',
+        '/api/modules/insurance/evaluate',
+        '/api/modules/crypto/evaluate',
+        '/api/modules/healthcare/evaluate',
+        '/api/modules/securities/evaluate',
+      ],
+    });
   });
 
   return app;

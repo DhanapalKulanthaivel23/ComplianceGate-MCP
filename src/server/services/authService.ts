@@ -15,7 +15,11 @@ export type Permission =
   | 'ADJUDICATE_CASE'
   | 'CONFIRM_SANCTIONS_MATCH'
   | 'MANAGE_WATCHLISTS'
-  | 'MANAGE_STORAGE_BACKUPS';
+  | 'MANAGE_STORAGE_BACKUPS'
+  | 'VIEW_SOURCES'
+  | 'MANAGE_SOURCES'
+  | 'VIEW_SUBJECTS'
+  | 'MANAGE_SUBJECTS';
 
 export interface AuthenticatedPrincipal {
   userId: string;
@@ -42,12 +46,17 @@ const ROLE_PERMISSIONS: Record<UserRole, ReadonlySet<Permission>> = {
   AUDITOR: new Set([
     'VIEW_CASES',
     'VIEW_UNREDACTED_EVIDENCE',
+    'VIEW_SOURCES',
+    'VIEW_SUBJECTS',
   ]),
   ANALYST: new Set([
     'SCREEN_TRANSACTION',
     'VIEW_CASES',
     'VIEW_UNREDACTED_EVIDENCE',
     'ADJUDICATE_CASE',
+    'VIEW_SOURCES',
+    'VIEW_SUBJECTS',
+    'MANAGE_SUBJECTS',
   ]),
   SENIOR_OFFICER: new Set([
     'SCREEN_TRANSACTION',
@@ -56,6 +65,10 @@ const ROLE_PERMISSIONS: Record<UserRole, ReadonlySet<Permission>> = {
     'ADJUDICATE_CASE',
     'CONFIRM_SANCTIONS_MATCH',
     'MANAGE_WATCHLISTS',
+    'VIEW_SOURCES',
+    'MANAGE_SOURCES',
+    'VIEW_SUBJECTS',
+    'MANAGE_SUBJECTS',
   ]),
   ADMIN: new Set([
     'SCREEN_TRANSACTION',
@@ -65,6 +78,10 @@ const ROLE_PERMISSIONS: Record<UserRole, ReadonlySet<Permission>> = {
     'CONFIRM_SANCTIONS_MATCH',
     'MANAGE_WATCHLISTS',
     'MANAGE_STORAGE_BACKUPS',
+    'VIEW_SOURCES',
+    'MANAGE_SOURCES',
+    'VIEW_SUBJECTS',
+    'MANAGE_SUBJECTS',
   ]),
 };
 
@@ -83,16 +100,39 @@ function hashPassword(password: string, salt: string): string {
   return crypto.scryptSync(password, salt, 64).toString('hex');
 }
 
+export interface AuthServiceOptions {
+  isPublicDemo?: boolean;
+  signingSecret?: string;
+  seedDemoUsers?: boolean;
+}
+
 export class AuthService {
   private usersByUsername: Map<string, StoredUserAccount> = new Map();
   private revokedSessions: Set<string> = new Set();
   private readonly signingSecret: string;
+  private readonly isPublicDemo: boolean;
 
-  constructor() {
-    this.signingSecret =
-      process.env.AUTH_JWT_SECRET ||
-      crypto.createHash('sha256').update('compliancegate-enterprise-hmac-key-2026').digest('hex');
-    this.seedDefaultAccounts();
+  constructor(options?: AuthServiceOptions) {
+    const isPublicDemo = options?.isPublicDemo ?? (process.env.IS_PUBLIC_DEMO !== 'false');
+    this.isPublicDemo = isPublicDemo;
+
+    if (!isPublicDemo) {
+      const secret = options?.signingSecret || process.env.AUTH_JWT_SECRET;
+      if (!secret || secret.trim().length === 0) {
+        throw new Error('Fatal configuration error: AUTH_JWT_SECRET environment variable is mandatory in enterprise mode.');
+      }
+      this.signingSecret = secret.trim();
+    } else {
+      this.signingSecret =
+        options?.signingSecret ||
+        process.env.AUTH_JWT_SECRET ||
+        crypto.createHash('sha256').update('compliancegate-enterprise-hmac-key-2026').digest('hex');
+    }
+
+    const shouldSeed = options?.seedDemoUsers ?? isPublicDemo;
+    if (shouldSeed) {
+      this.seedDefaultAccounts();
+    }
   }
 
   private seedDefaultAccounts(): void {
@@ -270,8 +310,11 @@ export class AuthService {
     if (!rawToken || typeof rawToken !== 'string') return null;
     const trimmed = rawToken.trim();
 
-    // Support legacy DEMO_ANALYST_TOKEN for sandbox UI and backward-compatible test assertions
+    // Support legacy DEMO_ANALYST_TOKEN strictly in public demo mode; prohibited in enterprise mode
     if (trimmed === DEMO_ANALYST_TOKEN) {
+      if (!this.isPublicDemo) {
+        return null;
+      }
       const now = Date.now();
       return {
         userId: 'demo_senior_analyst',
